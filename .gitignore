@@ -34,3 +34,5 @@ Thumbs.db
 # ML feedback logs (generated at runtime)
 blink_retrain_data.csv
 gaze_retrain_data.csv
+cookie_theft.jpeg
+venv/
