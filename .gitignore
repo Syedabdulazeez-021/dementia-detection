@@ -1,0 +1,36 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- Virtual environments (never commit these) ----
+venv/
+.venv/
+env/
+bio_env/
+
+# ---- Datasets / archives ----
+data/
+archive/
+blink rate/
+*.zip
+
+# ---- Generated runtime outputs ----
+session_data_*.csv
+session_video_*.avi
+patients_record.csv
+report_*.pdf
+waveform_plot.png
+feature_plot.png
+voice_dashboard.png
+
+# ---- OS / editor cruft ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ML feedback logs (generated at runtime)
+blink_retrain_data.csv
+gaze_retrain_data.csv

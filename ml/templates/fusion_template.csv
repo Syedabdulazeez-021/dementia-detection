@@ -1,0 +1,4 @@
+eye_score,gaze_score,voice_score,true_label
+# SAME person did all three tests; scores 0-100; true_label 0=normal 1=dementia
+22,18,30,0
+61,69,72,1
