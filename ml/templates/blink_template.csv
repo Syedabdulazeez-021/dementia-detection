@@ -1,0 +1,4 @@
+blink_rate,blink_variance,eye_openness,micro_sleeps,partial_blinks,true_label
+# fill with REAL sessions; one row per person; true_label 0=normal 1=dementia
+18.5,2.1,0.29,0,1,0
+9.0,8.4,0.18,3,5,1

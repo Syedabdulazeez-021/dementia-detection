@@ -1,0 +1,2 @@
+timestamp,source,predicted_label,p_ad,MFCC2,kurt_MFCC30,mean_MFCC30,skew_MFCC2,mean_MFCC16,flt_bnk_eng22,MFCC30,kurt_MFCC16,flt_bnk_eng2,flt_bnk_eng24,MFCC1,flt_bnk_eng15,kurt_MFCC2,flt_bnk_eng20,flt_bnk_eng13,n_sil_segments,frac_silence,min_sil_len,jitter,shimmer,HNR,true_label
+2026-06-19 19:53:50,microphone,0,0.5375,263.00818,0.094011,-0.580188,-1.211112,-1.247185,-1944.8118,10.489139,0.636465,-1735.9043,-1921.5678,-174.445677,-1952.2539,2.403164,-1928.6832,-1879.3162,1.30932,1.504492,1.817475,0.041608,0.535872,20.119483,
