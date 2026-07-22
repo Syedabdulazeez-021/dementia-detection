@@ -37,3 +37,8 @@ gaze_retrain_data.csv
 cookie_theft.jpeg
 venv/
 myenv/
+
+# session data - never commit
+retrain_data.csv
+dementia_features_log.xlsx
+blink_gaze_data.xlsx
