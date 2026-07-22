@@ -227,3 +227,11 @@ Worth being upfront about:
 - The combined system hasn't been validated on a labelled clinical cohort yet.
 
 Use this as a screening or research tool, not a diagnostic one.
+## Voice test stimulus
+
+The voice test uses the Cookie Theft picture from the Boston Diagnostic
+Aphasia Examination (Goodglass & Kaplan, 1983). The image is copyrighted
+and is not distributed with this repository.
+
+Place your own licensed copy at the repository root as `cookie_theft.jpeg`
+before running the voice test.
