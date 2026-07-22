@@ -279,7 +279,13 @@ class DementiaAnalyser:
             print("[OK] Model + Scaler loaded (pickle)")
 
     # ── live recording with progress bar ─────────────────────────────────────
-    def record_audio(self, duration=None):
+    def record_audio(self, duration=None, should_stop=None):
+        """Record from the microphone.
+
+        `should_stop` is an optional zero-arg callable polled ~4x/second; when
+        it returns True the recording stops early and whatever was captured so
+        far is returned. This is what lets the GUI's Cancel button abort a
+        55-second recording instead of waiting it out."""
         if not SD_AVAILABLE:
             raise ImportError("pip install sounddevice")
         import time
@@ -302,6 +308,9 @@ class DementiaAnalyser:
         print("  Speak naturally — describe your day, a memory, a picture …")
         print("=" * 60)
         for i in (3, 2, 1):
+            if should_stop and should_stop():
+                print("\n  ██ CANCELLED ██\n")
+                return np.zeros(0, dtype='float32')
             sys.stdout.write(f"\r  Starting in {i} …   ")
             sys.stdout.flush()
             time.sleep(1)
@@ -315,8 +324,12 @@ class DementiaAnalyser:
         t0 = time.time()
         BW, MW = 30, 10
 
+        cancelled = False
         try:
             while True:
+                if should_stop and should_stop():
+                    cancelled = True
+                    break
                 elapsed = time.time() - t0
                 if elapsed >= duration: break
                 filled   = int(BW * elapsed / duration)
@@ -336,6 +349,9 @@ class DementiaAnalyser:
             stream.stop(); stream.close()
 
         sys.stdout.write('\n')
+        if cancelled:
+            print("\n  ██ RECORDING CANCELLED ██\n")
+            return buf[:pos[0]]
         print("\n  ██ RECORDING COMPLETE ██\n")
         audio = buf[:pos[0]]
         rms = float(np.sqrt(np.mean(audio ** 2)))
@@ -1028,7 +1044,7 @@ class DementiaAnalyser:
     # ── GUI-callable API ───────────────────────────────────────────────────────
     def run_analysis_for_gui(self, audio_file=None, plot=True,
                               excel_path=None, ensemble=True,
-                              progress_callback=None):
+                              progress_callback=None, should_stop=None):
         """
         Run the full dementia analysis pipeline and return a structured result
         dictionary suitable for display in a GUI.
@@ -1064,15 +1080,24 @@ class DementiaAnalyser:
                 except Exception:
                     pass
 
+        def _cancelled():
+            try:
+                return bool(should_stop and should_stop())
+            except Exception:
+                return False
+
         result = {
             'prediction': 0, 'proba': [1.0, 0.0], 'risk_pct': 0.0,
             'risk_category': 'Low', 'key_indicators': [],
             'metrics': {}, 'plot_paths': {}, 'excel_path': None,
-            'error': ''
+            'error': '', 'cancelled': False
         }
 
         try:
             _cb('Loading audio…', 5)
+            if _cancelled():
+                result['cancelled'] = True
+                return result
             if audio_file:
                 if not os.path.exists(audio_file):
                     result['error'] = f"Audio file not found: {audio_file}"
@@ -1081,8 +1106,18 @@ class DementiaAnalyser:
                 source = os.path.basename(audio_file)
             else:
                 _cb('Recording from microphone…', 10)
-                signal = self.record_audio()
+                signal = self.record_audio(should_stop=should_stop)
                 source = 'microphone'
+                # A cancelled recording returns whatever was captured so far;
+                # too short to analyse means the user aborted it.
+                if len(signal) < self.sample_rate:
+                    result['cancelled'] = True
+                    return result
+
+            # Bail out before the expensive feature extraction / plotting.
+            if _cancelled():
+                result['cancelled'] = True
+                return result
 
             _cb('Extracting acoustic features…', 30)
             if ensemble and len(signal) > 30 * self.sample_rate:
@@ -1158,6 +1193,10 @@ class DementiaAnalyser:
 
             # Approximate per-feature attribution for explainability (guarded)
             feature_contributions = _compute_voice_attribution(self.model, cal)
+
+            if _cancelled():
+                result['cancelled'] = True
+                return result
 
             _cb('Generating plots…', 70)
             plot_paths = {}

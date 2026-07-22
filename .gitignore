@@ -25,7 +25,7 @@ waveform_plot.png
 feature_plot.png
 voice_dashboard.png
 
-# ---- OS / editor cruft ----
+# ---- OS / editor / tooling cruft ----
 .vscode/
 .idea/
 .DS_Store

@@ -23,6 +23,10 @@ import numpy as np
 import mediapipe as mp
 import random
 
+# Contribution (in final-score points) at or above which a driver is flagged as
+# "major" on the report's top-drivers chart.
+MAJOR_DRIVER_PTS = 10.0
+
 def ear_to_percent(ear):
     """Convert Eye Aspect Ratio to an intuitive 0-100% scale."""
     return max(0.0, min(100.0, ((ear - 0.15) / (0.38 - 0.15)) * 100.0))
@@ -658,6 +662,9 @@ class DementiaDetectionGUI:
         }
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = None
+        self.gaze_fs_win = None
+        self.gaze_fs_label = None
+
     def setup_results_panel(self, parent):
         """Setup Page 3: Final Results and Export Panel"""
         # Top panel for patient details
@@ -1128,15 +1135,74 @@ class DementiaDetectionGUI:
         
         self.gaze_thread = threading.Thread(target=self.gaze_capture_loop, daemon=True)
         self.gaze_thread.start()
-        
+
+        # Run the stimulus on a full-screen window so the targets sit at a
+        # realistic peripheral angle instead of inside a 480x360 preview.
+        self._open_gaze_fullscreen()
+
         self.update_gaze_ui_loop()
+
+    def _open_gaze_fullscreen(self):
+        """Open a borderless full-screen stimulus window for the gaze trials.
+
+        It is closed automatically once the 10 trials finish (or the experiment
+        is stopped), returning the user to the normal gaze page so they can
+        carry on to the voice analysis."""
+        if getattr(self, 'gaze_fs_win', None) is not None:
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Gaze Stimulus Experiment")
+        win.configure(bg='black')
+        try:
+            win.attributes('-fullscreen', True)
+        except Exception:
+            win.geometry(f"{win.winfo_screenwidth()}x{win.winfo_screenheight()}+0+0")
+
+        # Closing the window (X or ESC) stops the experiment rather than
+        # leaving an orphaned capture loop running behind the scenes.
+        win.protocol("WM_DELETE_WINDOW", self.stop_gaze_experiment)
+        win.bind("<Escape>", lambda e: self.stop_gaze_experiment())
+
+        self.gaze_fs_label = tk.Label(win, bg='black')
+        self.gaze_fs_label.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(win, text="Follow the red dot with your eyes   —   press ESC to stop",
+                 font=("Segoe UI", 11), bg='black', fg='#888888').pack(side=tk.BOTTOM, pady=6)
+
+        self.gaze_fs_win = win
+        win.lift()
+        win.focus_force()
+
+    def _close_gaze_fullscreen(self):
+        """Destroy the full-screen stimulus window and return to the gaze page."""
+        win = getattr(self, 'gaze_fs_win', None)
+        self.gaze_fs_win = None
+        self.gaze_fs_label = None
+        if win is None:
+            return
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
 
     def stop_gaze_experiment(self):
         """Stop gaze experiment prematurely"""
         self.gaze_running = False
-        if self.gaze_cap:
-            self.gaze_cap.release()
-            
+        try:
+            if self.gaze_cap:
+                self.gaze_cap.release()
+                self.gaze_cap = None
+        except Exception:
+            pass
+
+        self._close_gaze_fullscreen()
+
         self.start_gaze_btn.config(state=tk.NORMAL)
         self.stop_gaze_btn.config(state=tk.DISABLED)
         self.finish_gaze_btn.config(state=tk.NORMAL)
@@ -1228,21 +1294,50 @@ class DementiaDetectionGUI:
                                 self.correct_trials += 1
                                 
                                 if self.trial_count >= self.total_trials:
-                                    self.gaze_running = False
+                                    # Set the state BEFORE clearing the flag: the UI
+                                    # loop exits on `not gaze_running`, so it must
+                                    # already see "FINISHED" on that final pass.
                                     self.gaze_experiment_state = "FINISHED"
+                                    self.gaze_running = False
                                 else:
                                     self.gaze_experiment_state = "FIXATION"
                                     self.fixation_time = time.time()
                     
                     self.current_gaze_frame = frame
-                    
+
             time.sleep(0.01)
+
+        # Release the webcam when the trials finish on their own, so a rerun (or
+        # the voice test) can reopen the device.
+        try:
+            if self.gaze_cap:
+                self.gaze_cap.release()
+                self.gaze_cap = None
+        except Exception:
+            pass
 
     def update_gaze_ui_loop(self):
         """Update Gaze UI with frames and metrics"""
         if hasattr(self, 'current_gaze_frame') and self.current_gaze_frame is not None:
             # Update video label
             frame_rgb = cv2.cvtColor(self.current_gaze_frame, cv2.COLOR_BGR2RGB)
+
+            # Mirror the frame onto the full-screen stimulus window, scaled up to
+            # the display while keeping the aspect ratio so the left/right targets
+            # stay at the true edges of the participant's field of view.
+            fs_label = getattr(self, 'gaze_fs_label', None)
+            fs_win = getattr(self, 'gaze_fs_win', None)
+            if fs_label is not None and fs_win is not None and fs_label.winfo_exists():
+                sw = fs_win.winfo_width() or self.root.winfo_screenwidth()
+                sh = fs_win.winfo_height() or self.root.winfo_screenheight()
+                fh, fw = frame_rgb.shape[:2]
+                scale = min(sw / float(fw), sh / float(fh))
+                fs_img = cv2.resize(frame_rgb,
+                                    (max(1, int(fw * scale)), max(1, int(fh * scale))))
+                fs_tk = ImageTk.PhotoImage(image=Image.fromarray(fs_img))
+                fs_label.imgtk = fs_tk
+                fs_label.configure(image=fs_tk)
+
             frame_resized = cv2.resize(frame_rgb, (480, 360))
             img = Image.fromarray(frame_resized)
             imgtk = ImageTk.PhotoImage(image=img)
@@ -1271,10 +1366,15 @@ class DementiaDetectionGUI:
                 pass
             
         if not self.gaze_running and getattr(self, 'gaze_experiment_state', '') == "FINISHED":
+            # All trials done — drop out of full screen back to the gaze page,
+            # where the user can review the graphs and move on to voice analysis.
+            self._close_gaze_fullscreen()
+            self.start_gaze_btn.config(state=tk.NORMAL)
             self.finish_gaze_btn.config(state=tk.NORMAL)
             self.stop_gaze_btn.config(state=tk.DISABLED)
-            
-        if self.gaze_running or getattr(self, 'gaze_experiment_state', '') == "FINISHED":
+            return  # stop the 33 ms refresh loop; nothing left to update
+
+        if self.gaze_running:
             self.root.after(33, self.update_gaze_ui_loop)
 
     def _init_gaze_graphs(self):
@@ -1727,6 +1827,255 @@ class DementiaDetectionGUI:
         self.explain_text.insert(tk.END, "\n".join(lines))
         self.explain_text.config(state=tk.DISABLED)
 
+    def _build_experiment_graphs_figure(self, fm, gaze):
+        """Build a second PDF page containing the graphs generated during the
+        experiment: eye openness over time, blink regularity, gaze reaction time
+        and saccade speed. Returns a matplotlib Figure (or None if no data)."""
+        ear_history = fm.get('ear_history', []) or []
+        blink_times = fm.get('blink_times', []) or []
+        rt_data = list(gaze.get('reaction_times', []) or [])
+        ss_data = list(gaze.get('saccade_speeds', []) or [])
+
+        if not (ear_history or len(blink_times) > 1 or rt_data or ss_data):
+            return None
+
+        fig = Figure(figsize=(8.27, 11.69), dpi=120)  # A4 portrait
+        fig.subplots_adjust(left=0.10, right=0.94, top=0.90, bottom=0.07,
+                            hspace=0.45, wspace=0.30)
+        fig.text(0.5, 0.955, "Experiment Graphs", ha='center',
+                 fontsize=18, fontweight='bold', color='#1f4e5f')
+        fig.text(0.5, 0.935, "Signals recorded during the blink & gaze session",
+                 ha='center', fontsize=10, color='#2e8b8b')
+        fig.add_artist(plt.Line2D([0.07, 0.93], [0.925, 0.925],
+                                  color='#2e8b8b', lw=1.2, transform=fig.transFigure))
+
+        # 1. Eye openness over time (L/R split)
+        ax1 = fig.add_subplot(2, 2, 1)
+        if ear_history:
+            left_raw = [ear_to_percent(e['left']) for e in ear_history]
+            right_raw = [ear_to_percent(e['right']) for e in ear_history]
+            window_size = max(5, len(ear_history) // 30)
+            left_values = smooth_data(left_raw, window_size)
+            right_values = smooth_data(right_raw, window_size)
+            frames = list(range(len(ear_history)))
+            ax1.plot(frames, left_values, color='#3498db', linewidth=1.0, alpha=0.8, label='Left Eye (%)')
+            ax1.plot(frames, right_values, color='#9b59b6', linewidth=1.0, alpha=0.8, label='Right Eye (%)')
+            thresh_percent = ear_to_percent(fm.get('current_threshold', 0.25))
+            ax1.axhline(y=thresh_percent, color='red', linestyle='--', linewidth=1.2, label='Blink Threshold')
+            ax1.set_ylim(0, 100)
+            ax1.set_ylabel('Eye Openness (%)', fontsize=8)
+            ax1.set_xlabel('Frame', fontsize=8)
+            ax1.grid(True, alpha=0.3)
+            ax1.legend(loc='lower right', fontsize=6)
+        else:
+            ax1.text(0.5, 0.5, 'Blink test not run', ha='center', va='center',
+                     fontsize=10, color='#a0aec0', transform=ax1.transAxes)
+        ax1.set_title('Eye Openness Over Time', fontsize=10, fontweight='bold', color='#555')
+
+        # 2. Blink regularity (inter-blink intervals)
+        ax2 = fig.add_subplot(2, 2, 2)
+        if len(blink_times) > 1:
+            intervals = np.diff(blink_times)
+            x_pos = np.arange(len(intervals))
+            colors = ['#2ecc71' if 2.0 <= iv <= 6.0 else '#e74c3c' for iv in intervals]
+            ax2.axhspan(2.0, 6.0, color='#2ecc71', alpha=0.10, label='Normal (2-6s)')
+            ax2.bar(x_pos, intervals, color=colors, width=0.6)
+            ax2.set_ylim(0, max(5.0, max(intervals) * 1.2))
+            ax2.set_xlabel('Blink #', fontsize=8)
+            ax2.set_ylabel('Interval (s)', fontsize=8)
+            ax2.grid(True, alpha=0.3)
+            ax2.legend(loc='upper right', fontsize=6)
+        else:
+            ax2.text(0.5, 0.5, 'Not enough blinks', ha='center', va='center',
+                     fontsize=10, color='#a0aec0', transform=ax2.transAxes)
+        ax2.set_title('Blink Regularity (Intervals)', fontsize=10, fontweight='bold', color='#555')
+
+        # 3. Gaze reaction time per trial
+        ax3 = fig.add_subplot(2, 2, 3)
+        if rt_data:
+            x_pos = np.arange(len(rt_data))
+            mean_rt = float(np.mean(rt_data))
+            bar_colors = ['#2ecc71' if v <= 0.5 else '#f39c12' if v <= 1.0 else '#e74c3c' for v in rt_data]
+            ax3.plot(x_pos, rt_data, color='#f39c12', marker='o', linewidth=1.8, zorder=3)
+            ax3.scatter(x_pos, rt_data, color=bar_colors, s=35, zorder=4)
+            ax3.axhspan(0, 0.5, color='#2ecc71', alpha=0.12, label='Normal (≤0.5s)')
+            ax3.axhline(mean_rt, color='#8e44ad', linestyle='--', linewidth=1.2, label=f'Mean {mean_rt:.2f}s')
+            ax3.set_ylim(0, max(2.0, max(rt_data) * 1.2))
+            ax3.set_xlabel('Trial', fontsize=8)
+            ax3.set_ylabel('Reaction time (s)', fontsize=8)
+            ax3.set_xticks(x_pos)
+            ax3.set_xticklabels([f"T{i+1}" for i in range(len(rt_data))], fontsize=6)
+            ax3.grid(True, alpha=0.3)
+            ax3.legend(loc='upper right', fontsize=6)
+        else:
+            ax3.text(0.5, 0.5, 'Gaze test not run', ha='center', va='center',
+                     fontsize=10, color='#a0aec0', transform=ax3.transAxes)
+        ax3.set_title('Gaze Reaction Time per Trial', fontsize=10, fontweight='bold', color='#555')
+
+        # 4. Saccade speed per trial
+        ax4 = fig.add_subplot(2, 2, 4)
+        if ss_data:
+            x_pos = np.arange(len(ss_data))
+            mean_ss = float(np.mean(ss_data))
+            bar_colors = ['#e74c3c' if v < 100 else '#f39c12' if v < 300 else '#2ecc71' for v in ss_data]
+            ax4.bar(x_pos, ss_data, color=bar_colors, width=0.6)
+            ax4.axhline(mean_ss, color='#8e44ad', linestyle='--', linewidth=1.2, label=f'Mean {mean_ss:.0f} px/s')
+            ax4.set_ylim(0, max(100, max(ss_data) * 1.2))
+            ax4.set_xlabel('Trial', fontsize=8)
+            ax4.set_ylabel('Speed (px/s)', fontsize=8)
+            ax4.set_xticks(x_pos)
+            ax4.set_xticklabels([f"T{i+1}" for i in range(len(ss_data))], fontsize=6)
+            ax4.grid(True, alpha=0.3)
+            ax4.legend(loc='upper right', fontsize=6)
+        else:
+            ax4.text(0.5, 0.5, 'Gaze test not run', ha='center', va='center',
+                     fontsize=10, color='#a0aec0', transform=ax4.transAxes)
+        ax4.set_title('Saccade Speed per Trial', fontsize=10, fontweight='bold', color='#555')
+
+        return fig
+
+    def _draw_reference_ranges(self, ax, fm, gaze, voice,
+                               eye_avail, gaze_avail, voice_avail):
+        """Draw one 'measured value vs normal range' row per key metric.
+
+        Each row has its own units, so every row is drawn on a track normalised
+        to its own axis: a grey track for the full plausible range, a green band
+        for the healthy range, a dashed threshold marker, and a diamond at the
+        patient's value. This replaces the numeric threshold text — the reader
+        can see at a glance which metrics fall outside the normal band.
+
+        Rows are (label, value, axis_lo, axis_hi, healthy_lo, healthy_hi, unit,
+        fmt) where the healthy band is expressed in the row's own units.
+        """
+        rows = []
+
+        if eye_avail:
+            # Normal blink rate 12-25 bpm (dementia_analyzer.NORMAL_BLINK_RATE_*)
+            rows.append(("Blink rate", float(fm.get('blink_rate', 0) or 0),
+                         0, 40, 12, 25, "bpm", "{:.1f}"))
+            # Eye openness: healthy is at or above the EAR 0.25 cut-off
+            rows.append(("Eye openness", ear_to_percent(fm.get('avg_ear', 0) or 0),
+                         0, 100, ear_to_percent(0.25), 100, "%", "{:.0f}"))
+
+        if gaze_avail:
+            rows.append(("Gaze reaction time", float(gaze.get('avg_reaction_time', 0) or 0),
+                         0, 1.5, 0, 0.5, "s", "{:.2f}"))
+            rows.append(("Gaze accuracy", float(gaze.get('accuracy', 0) or 0),
+                         50, 100, 90, 100, "%", "{:.0f}"))
+            rows.append(("Saccade speed", float(gaze.get('avg_saccade_speed', 0) or 0),
+                         0, 600, 300, 600, "px/s", "{:.0f}"))
+
+        if voice_avail:
+            # Voice risk: the model's Low band is < 40 %
+            rows.append(("Voice risk (model)", float(voice.get('risk_pct', 0) or 0),
+                         0, 100, 0, 40, "%", "{:.0f}"))
+
+        if not rows:
+            ax.axis('off')
+            ax.text(0.5, 0.5, "No tests completed", ha='center', va='center',
+                    fontsize=10, color='#999')
+            return
+
+        def norm(v, lo, hi):
+            return max(0.0, min(1.0, (v - lo) / float(hi - lo))) if hi > lo else 0.0
+
+        rows = rows[::-1]                      # first metric at the top
+        for i, (label, val, lo, hi, hlo, hhi, unit, fmt) in enumerate(rows):
+            # Full range track
+            ax.barh(i, 1.0, height=0.55, color='#eef1f4', zorder=1)
+            # Healthy band
+            h0, h1 = norm(hlo, lo, hi), norm(hhi, lo, hi)
+            ax.barh(i, h1 - h0, left=h0, height=0.55, color='#2ecc71',
+                    alpha=0.28, zorder=2)
+
+            # Dashed threshold marker on the edge of the healthy band that the
+            # value can actually cross (the open end needs no marker).
+            for edge, e_val in ((h0, hlo), (h1, hhi)):
+                if 0.001 < edge < 0.999:
+                    ax.plot([edge, edge], [i - 0.30, i + 0.30],
+                            color='#c0392b', ls='--', lw=1.1, zorder=4)
+                    ax.text(edge, i + 0.40, fmt.format(e_val), fontsize=5.8,
+                            color='#c0392b', ha='center', va='bottom', zorder=4)
+
+            # Patient value
+            inside = hlo <= val <= hhi
+            mcolor = '#2e8b8b' if inside else '#e74c3c'
+            x = norm(val, lo, hi)
+            ax.plot(x, i, marker='D', ms=7, color=mcolor,
+                    markeredgecolor='white', markeredgewidth=1.0, zorder=5)
+            # Keep the annotation inside the axes at both extremes
+            ha, dx = ('left', 0.015) if x < 0.85 else ('right', -0.015)
+            ax.text(x + dx, i, f"{fmt.format(val)} {unit}", fontsize=7,
+                    fontweight='bold', color=mcolor, va='center', ha=ha, zorder=5)
+
+        ax.set_yticks(range(len(rows)))
+        ax.set_yticklabels([r[0] for r in rows], fontsize=7.5)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(-0.6, len(rows) - 0.4)
+        ax.set_xticks([])
+        ax.tick_params(length=0)
+        for s in ['top', 'right', 'bottom', 'left']:
+            ax.spines[s].set_visible(False)
+        ax.legend(handles=[
+            Patch(facecolor='#2ecc71', alpha=0.28, label='Normal range'),
+            plt.Line2D([0], [0], color='#c0392b', ls='--', lw=1.1, label='Threshold'),
+            plt.Line2D([0], [0], marker='D', ls='', color='#2e8b8b', label='Within range'),
+            plt.Line2D([0], [0], marker='D', ls='', color='#e74c3c', label='Outside range'),
+        ], loc='upper center', bbox_to_anchor=(0.5, -0.04), ncol=4,
+            fontsize=6.5, frameon=False)
+
+    def _build_voice_graph_figures(self, voice):
+        """Build one full-page PDF figure per voice-analysis chart.
+
+        The voice module already renders its dashboard / waveform / feature
+        plots to PNG; this embeds each of them on its own A4 page so the voice
+        graphs land in the downloaded report alongside the eye and gaze ones."""
+        figs = []
+        paths = (voice or {}).get('plot_paths', {}) or {}
+        titles = [
+            ('dashboard', 'Voice Analysis Dashboard'),
+            ('waveform',  'Voice Waveform & Speech Segmentation'),
+            ('feature',   'Voice Feature Comparison'),
+        ]
+        try:
+            import matplotlib.image as mpimg
+        except Exception:
+            return figs
+
+        for key, title in titles:
+            path = paths.get(key)
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                img = mpimg.imread(path)
+            except Exception:
+                continue
+            pw, ph = 8.27, 11.69
+            fig = Figure(figsize=(pw, ph), dpi=120)
+            fig.text(0.5, 0.955, title, ha='center', fontsize=18,
+                     fontweight='bold', color='#1f4e5f')
+            fig.text(0.5, 0.935, "Recorded during the voice screening session",
+                     ha='center', fontsize=10, color='#2e8b8b')
+            fig.add_artist(plt.Line2D([0.07, 0.93], [0.925, 0.925],
+                                      color='#2e8b8b', lw=1.2, transform=fig.transFigure))
+
+            # Size the axes to the image's own aspect ratio so a wide dashboard
+            # fills the page width instead of floating in a sea of white space.
+            ih, iw = img.shape[0], img.shape[1]
+            avail_w, avail_h = 0.90, 0.85          # figure fractions
+            box_w = avail_w
+            box_h = (box_w * pw) * (ih / float(iw)) / ph
+            if box_h > avail_h:                     # tall image: fit height instead
+                box_h = avail_h
+                box_w = (box_h * ph) * (iw / float(ih)) / pw
+            left = (1.0 - box_w) / 2.0
+            bottom = 0.90 - box_h                   # anchor just under the header
+            ax = fig.add_axes([left, max(0.04, bottom), box_w, box_h])
+            ax.imshow(img)
+            ax.axis('off')
+            figs.append(fig)
+        return figs
+
     def generate_report(self):
         """Generate a polished one-page PDF clinical screening report (uses matplotlib)."""
         try:
@@ -1813,42 +2162,58 @@ class DementiaDetectionGUI:
                 if r == 0:
                     cell.set_facecolor('#2e8b8b'); cell.set_text_props(color='white', fontweight='bold')
 
-            # Explainability chart
-            fig.text(0.07, 0.60, "Why this score? — feature contributions to the final score",
+            # ---- Top drivers: bar chart (replaces the old numeric list) ------
+            fig.text(0.07, 0.605, "Top drivers — what pushed the score up",
                      fontsize=11, fontweight='bold', color='#1f4e5f')
-            ax_x = fig.add_axes([0.30, 0.36, 0.60, 0.22])
+            ax_x = fig.add_axes([0.30, 0.40, 0.60, 0.19])
             contribs = [c for c in explanation.get('contributions', []) if c['contribution'] > 0][:8]
             mod_colors = {'eye': '#3498db', 'gaze': '#f39c12', 'voice': '#9b59b6'}
             if contribs:
-                contribs = contribs[::-1]
-                ax_x.barh(range(len(contribs)), [c['contribution'] for c in contribs],
-                          color=[mod_colors.get(c['modality'], '#888') for c in contribs])
-                ax_x.set_yticks(range(len(contribs)))
-                ax_x.set_yticklabels([c['label'] for c in contribs], fontsize=7.5)
+                bars = contribs[::-1]          # largest driver at the top
+                vals = [c['contribution'] for c in bars]
+                ax_x.barh(range(len(bars)), vals,
+                          color=[mod_colors.get(c['modality'], '#888') for c in bars])
+                ax_x.set_yticks(range(len(bars)))
+                ax_x.set_yticklabels([c['label'] for c in bars], fontsize=7.5)
                 ax_x.set_xlabel('Points contributed to final score', fontsize=8)
-                for i, c in enumerate(contribs):
-                    ax_x.text(c['contribution'] + 0.2, i, f"{c['contribution']:.1f}",
-                              va='center', fontsize=6.5)
+                ax_x.set_xlim(0, max(vals) * 1.18)
+
+                # "Major driver" threshold: anything at/above 10 points is called
+                # out, so the reader can see which bars actually matter.
+                ax_x.axvline(MAJOR_DRIVER_PTS, color='#c0392b', ls='--', lw=1.1, zorder=3)
+                ax_x.text(MAJOR_DRIVER_PTS, len(bars) - 0.35,
+                          f' major driver ≥ {MAJOR_DRIVER_PTS:g} pts',
+                          fontsize=6.5, color='#c0392b', va='center')
+                for i, v in enumerate(vals):
+                    ax_x.text(v + max(vals) * 0.015, i, f"{v:.1f}", va='center', fontsize=6.5)
                 ax_x.grid(True, axis='x', alpha=0.3)
+                ax_x.tick_params(labelsize=7)
                 for s in ['top', 'right']:
                     ax_x.spines[s].set_visible(False)
+
+                # Legend so the bar colours are self-explanatory
+                present = []
+                for m, lab in (('eye', 'Eye / Blink'), ('gaze', 'Gaze'), ('voice', 'Voice')):
+                    if any(c['modality'] == m for c in bars):
+                        present.append(Patch(facecolor=mod_colors[m], label=lab))
+                if present:
+                    ax_x.legend(handles=present, loc='lower right', fontsize=6.5, framealpha=0.9)
             else:
                 ax_x.axis('off')
                 ax_x.text(0.5, 0.5, "All measured features within normal ranges",
                           ha='center', va='center', fontsize=10, color='#999')
 
-            # Interpretation text
-            lines = [explanation.get('summary', ''), ""]
-            mt = explanation.get('modality_totals', {})
-            ml = {'eye': 'Eye/Blink', 'gaze': 'Gaze', 'voice': 'Voice'}
-            for m in ['voice', 'eye', 'gaze']:
-                if m in mt:
-                    lines.append(f"  - {ml[m]} contributed +{mt[m]:.1f} points")
-            lines.append("")
-            lines.append("Top drivers:")
-            for c in contribs[::-1][:5] if contribs else []:
-                lines.append(f"  - {c['label']} (+{c['contribution']:.1f})")
-            fig.text(0.07, 0.335, "\n".join(lines), fontsize=8.5, va='top', color='#333')
+            # ---- Measured value vs clinical threshold, per modality ----------
+            fig.text(0.07, 0.355,
+                     "Measured values vs normal range — eye, gaze and voice",
+                     fontsize=11, fontweight='bold', color='#1f4e5f')
+            ax_ref = fig.add_axes([0.30, 0.155, 0.60, 0.185])
+            self._draw_reference_ranges(ax_ref, fm, gaze, voice,
+                                        eye_avail, gaze_avail, voice_avail)
+
+            # One plain-language sentence; every number now lives in the charts.
+            fig.text(0.07, 0.128, explanation.get('summary', ''),
+                     fontsize=8.5, va='top', color='#333', wrap=True)
 
             # Footer / disclaimer
             fig.add_artist(plt.Line2D([0.07, 0.93], [0.08, 0.08],
@@ -1862,6 +2227,14 @@ class DementiaDetectionGUI:
 
             with PdfPages(out_path) as pdf:
                 pdf.savefig(fig)
+                # Page 2: the graphs generated during the blink & gaze experiment
+                fig2 = self._build_experiment_graphs_figure(fm, gaze)
+                if fig2 is not None:
+                    pdf.savefig(fig2)
+                # Pages 3+: the voice analysis graphs
+                if voice_avail:
+                    for vfig in self._build_voice_graph_figures(voice):
+                        pdf.savefig(vfig)
 
             messagebox.showinfo("Report Generated",
                                 f"PDF report saved to:\n{out_path}")
@@ -1871,6 +2244,37 @@ class DementiaDetectionGUI:
                 pass
         except Exception as e:
             messagebox.showerror("Report Error", f"Could not generate report:\n{e}")
+
+    def _migrate_csv_header(self, csv_file, headers):
+        """Ensure an existing CSV has the current header. If new columns were
+        added, rewrite the header and pad every existing data row with blanks so
+        the columns stay aligned."""
+        try:
+            with open(csv_file, mode='r', newline='', encoding='utf-8') as f:
+                rows = list(csv.reader(f))
+        except Exception:
+            return  # If we can't read it, leave it alone and let append proceed
+
+        if not rows:
+            return
+        existing_header = rows[0]
+        if existing_header == headers:
+            return  # Already up to date
+
+        # Only migrate when we are strictly adding columns to the known header
+        if headers[:len(existing_header)] != existing_header:
+            return
+
+        target_len = len(headers)
+        new_rows = [headers]
+        for r in rows[1:]:
+            if len(r) < target_len:
+                r = r + [''] * (target_len - len(r))
+            new_rows.append(r)
+
+        with open(csv_file, mode='w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerows(new_rows)
 
     def export_patient_data(self):
         """Export all session and patient data to central CSV"""
@@ -1883,7 +2287,8 @@ class DementiaDetectionGUI:
             "Total Blinks", "Blink Rate (bpm)", "Avg EAR", "Eye Risk Level", "Eye Score (%)",
             "Avg Reaction Time", "Avg Saccade Speed", "Gaze Accuracy", "Trials", "Gaze Score (%)",
             "Voice Risk Level", "Voice Risk Score (%)", "Speech Rate", "Voice Jitter", "Voice Shimmer", "Voice HNR", "Voice Silence %",
-            "Overall Score (%)", "Overall Level", "Top Risk Driver"
+            "Overall Score (%)", "Overall Level", "Top Risk Driver",
+            "No of Blinks", "Total Reaction Time"
         ]
         
         gaze = getattr(self, 'gaze_results', {})
@@ -1940,10 +2345,18 @@ class DementiaDetectionGUI:
             v_met.get('frac_silence', ''),
             overall_score_csv,
             overall_level_csv,
-            top_driver_csv
+            top_driver_csv,
+            # New columns: number of blinks and the total (summed) reaction time
+            self.final_metrics.get('total_blinks', 0),
+            round(sum(gaze.get('reaction_times', []) or []), 2),
         ]
-        
+
         try:
+            # If the file already exists with an older header (fewer columns),
+            # migrate it so the new columns line up for existing rows too.
+            if file_exists:
+                self._migrate_csv_header(csv_file, headers)
+
             with open(csv_file, mode='a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 if not file_exists:
@@ -2201,18 +2614,54 @@ class DementiaDetectionGUI:
         pbar_fill.place(relwidth=0.0, relheight=1.0)
 
         cancel_var = [False]
+
+        def _cancel_analysis():
+            """Signal the worker thread and close the dialog straight away.
+
+            The worker polls cancel_var (via should_stop) roughly 4x/second
+            during the recording, so it winds itself down shortly after; we do
+            not wait for it, otherwise the button would feel dead for the rest
+            of the 55-second recording."""
+            if cancel_var[0]:
+                return
+            cancel_var[0] = True
+            try:
+                cancel_btn.config(state=tk.DISABLED, text="Cancelling…")
+            except Exception:
+                pass
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
         cancel_btn = tk.Button(
             right_frame, text="Cancel Analysis",
             font=("Segoe UI", 10, "bold"), bg='#e53e3e', fg='white',
             relief=tk.FLAT, cursor='hand2',
-            command=lambda: cancel_var.__setitem__(0, True)
+            command=_cancel_analysis
         )
         cancel_btn.pack(pady=10)
+
+        # Closing the dialog with the X must cancel too, not orphan the worker.
+        dlg.protocol("WM_DELETE_WINDOW", _cancel_analysis)
 
         class TerminalRedirect:
             def __init__(self, text_widget):
                 self.text_widget = text_widget
             def write(self, string):
+                # The dialog can be destroyed mid-analysis (Cancel), while the
+                # worker thread is still printing. Scheduling onto a dead widget
+                # raises TclError, so bail out quietly instead.
+                try:
+                    if not self.text_widget.winfo_exists():
+                        return
+                except Exception:
+                    return
+
                 def _append():
                     if not self.text_widget.winfo_exists(): return
                     if '\r' in string:
@@ -2258,7 +2707,8 @@ class DementiaDetectionGUI:
                 result = analyser.run_analysis_for_gui(
                     audio_file=None,
                     plot=True,
-                    progress_callback=_update_progress)
+                    progress_callback=_update_progress,
+                    should_stop=lambda: cancel_var[0])
             except Exception as exc:
                 result = {'error': str(exc), 'prediction': 0,
                           'proba': [1.0, 0.0], 'risk_pct': 0.0,
@@ -2273,7 +2723,9 @@ class DementiaDetectionGUI:
                 dlg.destroy()
             except Exception:
                 pass
-            if cancel_var[0]:
+            # Cancelled: drop the (partial) result silently, keep any previous
+            # voice results intact so the report isn't left half-populated.
+            if cancel_var[0] or result.get('cancelled'):
                 return
             if result.get('error'):
                 messagebox.showerror(
