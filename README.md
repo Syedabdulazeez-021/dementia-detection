@@ -1,237 +1,186 @@
-# 🧠 Cognitive Risk Assessment (BIO)
+# Cognitive Risk Assessment (CRAT)
 
-![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
-![MediaPipe](https://img.shields.io/badge/mediapipe-0.10.21-orange)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Status](https://img.shields.io/badge/status-research%20prototype-yellow)
+## 1. What this is
 
-A desktop tool that estimates cognitive-risk indicators from three neurological signals — blink patterns, gaze behaviour, and voice acoustics — using nothing but a webcam and a microphone. Everything runs offline.
+CRAT is a desktop application that looks for early signs of cognitive decline
+using only a normal laptop webcam and microphone. It runs three short tests,
+scores each one from 0 to 100, and combines them into a single risk number with
+an explanation of what produced it.
 
-| Channel | What it measures | How |
-|---|---|---|
-| 👁 **Blink** | blink rate, irregularity, eye openness, micro-sleeps, partial blinks | MediaPipe Face Mesh + Eye-Aspect-Ratio |
-| 🎯 **Gaze** | reaction time, accuracy, saccade speed | 10-trial stimulus reaction task |
-| 🎙 **Voice** | 21 acoustic features → dementia-likeness | Cookie-Theft description + Random Forest |
+Everything runs on the computer itself. No internet connection is used and no
+data leaves the machine.
 
-> ⚠️ **This is a research screening aid, not a medical diagnosis.** A higher score means more behavioural indicators are present — not a confirmed condition. Please consult a clinician for anything clinical.
+**This is a research prototype and a screening aid. It is not a medical device.
+It does not diagnose anything.** A score from this tool means some measurable
+indicators were present. It does not mean a person has dementia. Only a
+qualified clinician can make that judgement.
 
----
+## 2. The three tests
 
-## Table of Contents
+**Blink, 60 seconds.** The person sits still and blinks naturally while the
+webcam watches their eyes. The first few seconds are used to calibrate a
+baseline. The app measures how often they blink, how regular the gaps between
+blinks are, how wide the eyes stay open on average, how many long closures
+lasting more than half a second occur, and how many blinks are incomplete. An
+incomplete blink is one where the eyelid starts to close but does not fully
+shut.
 
-* [Highlights](#-highlights)
-* [Quick Start](#-quick-start)
-* [Workflow](#-workflow)
-* [The One Combined Score](#-the-one-combined-score)
-* [Explainable AI](#-explainable-ai)
-* [Machine Learning & the Feedback Loop](#-machine-learning--the-feedback-loop)
-* [Outputs](#-outputs)
-* [Project Structure](#-project-structure)
-* [Troubleshooting](#-troubleshooting)
-* [Limitations](#-limitations)
+**Gaze, 10 trials.** A dot appears on the left or the right of the screen. The
+person looks at it. For each trial the app measures how quickly they reacted,
+whether they looked the correct way, and how fast the eye moved. If there is no
+response within 3 seconds, the trial ends and counts as incorrect.
 
----
+**Voice, 55 seconds.** The person describes a picture out loud. The app pulls 21
+measurements out of the recording. These cover tone, loudness across different
+frequencies, the length and number of pauses, and how steady the voice is.
 
-## ✨ Highlights
+## 3. How the final score is worked out
 
-- Three independent channels (blink, gaze, voice) fused into a single risk score. You can also run just one or two if needed — the score adapts.
-- Every feature's contribution to the final score is shown in a bar chart that sums exactly to the overall result. No black box.
-- Live plots during the gaze test; a 4-panel voice dashboard (pitch, speech energy + vocal brightness, voice stability, top-8 z-scores) at the end of the voice test.
-- The gaze task runs **full-screen**, so the left/right targets sit at a realistic peripheral angle rather than inside a small preview. It closes itself once the 10 trials are done and drops you back to the gaze page.
-- One-click PDF report per patient — **every graph from all three tests included**, and the numbers are presented as charts with clinical thresholds drawn on them rather than as bare figures.
-- The voice channel is a trained Random Forest; blink and gaze are rule-based by default but will automatically switch to ML models if you drop trained ones in. See the feedback loop section.
-- No internet connection needed. Ever.
+Each test produces a score from 0 to 100, where a higher number means more
+indicators were found.
 
----
+The three scores are combined into one using a weighted average. Voice counts
+for 0.40, blink for 0.35, and gaze for 0.25. Voice carries the most weight
+because it is the only test that uses a trained model. The other two use rules
+taken from published research.
 
-## 🚀 Quick Start
-
-> **Use 64-bit Python 3.10, 3.11, or 3.12.** MediaPipe's `solutions` API isn't available on 3.13 yet.
-
-### Ubuntu / Debian — install system packages first
-
-```bash
-sudo apt update
-sudo apt install python3-tk portaudio19-dev python3-dev
+```
+overall = 0.40 x voice + 0.35 x blink + 0.25 x gaze
 ```
 
-`python3-tk` is for the GUI, `portaudio19-dev` for mic input, and `python3-dev` is needed by some audio packages at build time.
+If a test is skipped, its weight is dropped and the weights of the remaining
+tests are rescaled so they still add up to 1. The result stays on the same 0 to
+100 scale either way.
 
-### Windows
+The final number falls into one of five bands:
 
-```bash
-py -3.11 -m venv venv
-venv\Scripts\activate
-python --version
-pip install -r requirements.txt
+| Score | Band |
+|---|---|
+| 0 to 20 | LOW |
+| 20 to 40 | MILD |
+| 40 to 60 | MODERATE |
+| 60 to 80 | HIGH |
+| 80 to 100 | VERY HIGH |
+
+## 4. Why you can see how it decided
+
+The combination is a plain weighted sum, so it can be taken apart again. The app
+reports how many points each individual measurement contributed to the final
+number, and those contributions add back up to the final number exactly. There
+is no hidden step.
+
+The voice model is the one exception. It is a Random Forest classifier, so its
+share of the score cannot be split across its features exactly. The app
+approximates the split using the model's feature importances, and labels that
+part of the report as approximate.
+
+## 5. What has and has not been tested
+
+Read this before drawing any conclusion from a score.
+
+The **voice classifier** was tested on a held-out split of cognitively normal
+versus Alzheimer's recordings. It reached **63.7 percent accuracy, 75 percent
+specificity, and 52.5 percent sensitivity**. Sensitivity of 52.5 percent means
+it misses close to half of the people it should flag.
+
+The **blink and gaze scores are rule-based**. Their thresholds come from
+published ranges. They have no accuracy figure of their own, because they were
+never tested against labelled data.
+
+The **combined three-test score has never been tested against a labelled group
+of patients.** The weights of 0.40, 0.35 and 0.25 are informed defaults chosen
+by hand. They are not learned values, and there is no evidence that this
+particular combination performs better than any other.
+
+## 6. Installing and running
+
+Full steps are in [SETUP.md](SETUP.md). The short version:
+
+Python 3.12 is required, because the face-tracking library needs it. Newer
+versions of Python will not work.
+
+```powershell
+py -3.12 -m venv .venv312
+.\.venv312\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-### Ubuntu / Linux
+The second line is the Windows activation command. If PowerShell blocks it, run
+`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` first, then
+activate again.
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-python --version
-pip install -r requirements.txt
-python main.py
-```
+## 7. What you need
 
-`requirements.txt` pins `mediapipe==0.10.21`. The three model files (`models/eye_classifier_best.h5`, `dementia_rf_model.pkl`, `scaler.pkl`) are bundled and need to stay where they are.
+A laptop with a webcam and a microphone. Ordinary indoor lighting. Sit about 50
+to 60 cm from the screen. No special hardware is required.
 
----
+## 8. What comes out
 
-## 🩺 Workflow
+A PDF report containing:
 
-1. Register the patient.
-2. **Blink test (60 s)** — patient faces the camera; the first ~5 s calibrate a baseline automatically.
-3. **Gaze test (10 trials)** — opens full-screen for a quick 3-point calibration, then the patient looks at each target as it appears. The window closes on its own after the 10th trial and returns to the gaze page, where the reaction-time and saccade-speed graphs are waiting. Press `Esc` to stop early.
-4. **Voice test (55 s)** — patient describes the Cookie-Theft picture out loud; dashboard is generated at the end. **Cancel Analysis** aborts the recording immediately if needed.
-5. **Results** — per-test scores, the fused overall risk, and the "Why this score?" explainability panel.
-6. **Export** — CSV entry written automatically; PDF report on demand.
+- the overall score and its band
+- the score for each of the three tests
+- the charts from each test, with each test on its own page
+- a bar chart showing which individual measurements pushed the score up
+- a chart showing each measurement against its normal range
 
----
+Pages appear only for the tests that were actually run, so a partial session
+produces a shorter report. A row is also appended to a local CSV record.
 
-## 🧮 The One Combined Score
+## 9. Project layout
 
-```
-overall = Σ (testᵢ score × weightᵢ) / Σ weightᵢ
-
-weights:
-  voice = 0.40
-  blink = 0.35
-  gaze  = 0.25
-```
-
-If a test is skipped the remaining weights renormalise, so the score is still meaningful with a partial session.
-
-These weights come from the literature, not from training data. If you have a labelled same-subject cohort, `ml/train_fusion.py` can learn them instead.
-
----
-
-## 🔍 Explainable AI
-
-The results page and PDF both show a bar chart where each bar is one feature's contribution to the final score, colour-coded by channel. Because the fusion is linear, those bars sum exactly to the overall number.
-
-The Random Forest voice score is split across its top driving features using an importance-based attribution. It's approximate (not SHAP), and it's labelled that way.
-
----
-
-## 🤖 Machine Learning & the Feedback Loop
-
-Voice is the only channel currently using a trained model. Blink and gaze are rule-based for now, but if you place a trained model file in the right location they'll switch to it automatically — the results page will show an `[ML]` tag so you know which one is running.
-
-Every session logs its raw features to three CSV files:
-
-- `retrain_data.csv`
-- `blink_retrain_data.csv`
-- `gaze_retrain_data.csv`
-
-Each has a blank `true_label` column. Once a diagnosis is confirmed, fill it in:
-
-```
-0 = normal
-1 = dementia
-```
-
-Then retrain:
-
-```bash
-python ml/train_models.py --modality blink --data blink_retrain_data.csv
-python ml/train_models.py --modality gaze  --data gaze_retrain_data.csv
-python ml/train_fusion.py --data multimodal_labelled.csv
-python retrain.py
-```
-
-The model only ever learns from confirmed ground truth — not from its own previous predictions. That's intentional. See `ml/README.md` for CSV formats and pointers to real labelled datasets.
-
----
-
-## 📁 Outputs
-
-| File | What's in it |
+| Path | What it does |
 |---|---|
-| `patients_record.csv` | Central record — all scores + top risk driver per session |
-| `report_<token>_<timestamp>.pdf` | Per-patient clinical report — see below |
-| `*_retrain_data.csv` | Feature logs for building a labelled dataset over time |
-| `waveform_plot.png` | Raw audio waveform from the voice test |
-| `feature_plot.png` | Feature bar chart |
-| `voice_dashboard.png` | The 4-panel voice dashboard |
+| `main.py` | Entry point. Checks for the model files, then starts the interface. |
+| `gui_app.py` | The desktop interface. Runs all three tests, draws the live charts, and builds the PDF report. |
+| `dementia_analyzer.py` | Blink detection and the blink score. Finds blinks, long closures, and incomplete blinks from eye measurements. |
+| `mediapipe_detector.py` | Turns a webcam frame into eye measurements using a 468-point face mesh. |
+| `gui_adapter.py` | Connects the interface to the blink detector and the face mesh. |
+| `voice_dimentia.py` | Voice recording, the 21 acoustic measurements, the trained classifier, and the voice charts. |
+| `scoring.py` | The gaze score, the weighted combination, the risk bands, and the contribution breakdown. |
+| `crat_figures.py` | Shared colours and typography, plus the blink and gaze result figures. |
+| `crat_events.py` | Records when each event happened during a session. Held in memory only and never written to disk. |
+| `gaze_stimulus_experiment.py` | A standalone version of the gaze task. Not used by the desktop app. |
+| `app.py` | A separate web version built on Flask. It measures eye openness a different way, so its scores are not comparable. |
+| `ml/` | Scripts and CSV templates for training optional blink, gaze, and fusion models from labelled data. |
+| `retrain.py` | Retrains the voice model once confirmed diagnoses have been filled in. |
+| `dev/verify_scores.py` | Regression harness. Runs the scoring path with fixed inputs, so any change to a score shows up as a difference. |
+| `models/`, `dementia_rf_model.pkl`, `scaler.pkl` | Trained model files loaded at run time. |
+| `docs/` | Longer notes on how the system works, and the references behind the thresholds. |
 
-### What's in the PDF report
+## 10. Known limitations
 
-Generated by **📄 GENERATE PDF REPORT** on the results page. Pages appear only for the tests that were actually run, so a partial session produces a shorter report.
+- The blink rate is worked out by dividing the blink count by wall-clock time
+  since the session started, not by the 60 second recording window. If the app
+  is left open after the test finishes, the reported rate falls below the true
+  value.
+- Saccade speed is measured as iris movement in camera pixels, not as a gaze
+  angle. The 300 px/s reference it is compared against is therefore not
+  meaningful, and head movement is hard to separate from eye movement.
+- The gaze reaction times recorded so far are faster than a real eye movement
+  can be. The direction detection needs checking before those figures are
+  trusted.
+- Results depend on lighting, on whether the person wears glasses, and on webcam
+  quality.
+- The voice model was trained on a small, single-accent dataset. It may perform
+  worse on speakers whose accent is not represented in that data.
+- Eye closures shorter than half a second are counted, but their durations are
+  discarded, so there is no full picture of closure length.
+- Blink and gaze thresholds are heuristic. They were taken from published ranges
+  rather than learned from a clinical dataset.
+- The web version in `app.py` measures eye openness by a different method than
+  the desktop app. Scores from the two cannot be compared.
+- The system has not been validated on a clinical group. Treat it as a
+  demonstrator.
 
-| Page | Contents |
-|---|---|
-| 1 — Summary | Patient details, overall risk banner, per-test score table, **Top drivers** bar chart (with a "major driver ≥ 10 pts" threshold line), and a **measured-vs-normal-range** chart |
-| 2 — Blink & gaze graphs | Eye openness over time, blink regularity, gaze reaction time per trial, saccade speed per trial |
-| 3+ — Voice graphs | The voice dashboard, waveform/speech segmentation, and feature comparison charts |
+## 11. Voice test picture
 
-The two page-1 charts are the explainability core. **Top drivers** shows each feature's contribution in points, colour-coded by channel. **Measured vs normal range** puts blink rate, eye openness, gaze reaction time, gaze accuracy, saccade speed and voice risk each on its own track, with the healthy band shaded, the threshold marked, and the patient's value plotted as a diamond — teal inside the range, red outside. Thresholds are read from `scoring.py` and `dementia_analyzer.py`, so the chart and the score can't drift apart.
+The voice test uses the Cookie Theft picture from the Boston Diagnostic Aphasia
+Examination (Goodglass and Kaplan, 1983). The app looks for a file named
+`cookie_theft.jpeg`, `cookie_theft.jpg`, or `cookie_theft.png` in the repository
+root. If none is found, a placeholder is shown instead.
 
----
+## 12. Licence
 
-## 🗂 Project Structure
-
-```
-main.py                       Entry point → launches the GUI
-gui_app.py                    Tkinter GUI: pages, live graphs, full-screen gaze task, PDF report
-gui_adapter.py                Bridges webcam/detector with the analyzer
-mediapipe_detector.py         MediaPipe 468-landmark eye detector (EAR)
-dementia_analyzer.py          Blink/eye risk scoring + calibration
-gaze_stimulus_experiment.py   Gaze reaction-time logic
-voice_dimentia.py             Voice pipeline (21 features → Random Forest) + dashboard
-scoring.py                    Gaze score, fusion, explainability, optional ML model loading
-retrain.py                    Voice feedback-retraining (confirmed labels)
-ml/                           Training pipeline (train_models.py, train_fusion.py, templates)
-docs/                         HOW_IT_WORKS.md, REFERENCES.md
-models/eye_classifier_best.h5  Eye-state CNN
-dementia_rf_model.pkl         Voice Random Forest   (repo root)
-scaler.pkl                    Voice feature scaler  (repo root)
-```
-
-`docs/HOW_IT_WORKS.md` walks through the full system and explains every graph. Scientific references are in `docs/REFERENCES.md`.
-
----
-
-## 🔧 Troubleshooting
-
-**`AttributeError: module 'mediapipe' has no attribute 'solutions'`**
-
-You're on Python 3.13+. MediaPipe removed the legacy `mp.solutions` API in 0.10.31, and the versions that still have it (including the pinned `0.10.21`) ship no 3.13 wheel — so pip silently installs a newer, incompatible one. Use Python 3.10–3.12:
-
-```bash
-py -3.11 -m venv venv          # Windows
-python3.11 -m venv venv        # Linux/macOS
-```
-
-Check what you're actually running with `py -0p` (Windows) or `python3 --version`. Note that activating the venv is what makes `python` resolve to the right interpreter — outside it, plain `python` may still be 3.13.
-
-**The GUI takes 10–20 s to appear** — that's TensorFlow importing. Normal on first launch.
-
-**Camera or microphone not found** — close anything else using the device (Zoom, Teams, browser tabs) and allow access when the OS prompts. On Linux, make sure your user is in the `video` and `audio` groups.
-
-**The voice test shows a placeholder instead of a picture** — `cookie_theft.jpeg` is missing from the repo root. Any Cookie-Theft image named `cookie_theft.jpg`, `.png`, or `.jpeg` will be picked up.
-
----
-
-## ⚖ Limitations
-
-Worth being upfront about:
-
-- Fusion weights and blink/gaze thresholds are heuristic, not learned from a clinical dataset.
-- Webcam-based gaze is a practical proxy for proper saccade testing — convenient, but not the same thing.
-- The voice model was trained on a small, single-accent dataset. Specificity is decent; sensitivity less so.
-- Performance degrades with poor lighting, thick-framed glasses, or a low-quality microphone.
-- The combined system hasn't been validated on a labelled clinical cohort yet.
-
-Use this as a screening or research tool, not a diagnostic one.
-## Voice test stimulus
-
-The voice test uses the Cookie Theft picture from the Boston Diagnostic
-Aphasia Examination (Goodglass & Kaplan, 1983). The image is copyrighted
-and is not distributed with this repository.
-
-Place your own licensed copy at the repository root as `cookie_theft.jpeg`
-before running the voice test.
+See [LICENSE](LICENSE).

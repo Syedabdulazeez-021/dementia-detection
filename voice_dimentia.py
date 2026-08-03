@@ -61,6 +61,21 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.gridspec as gridspec
 
+# Shared CRAT style + palette. Importing crat_figures calls apply_style(), which
+# sets the shared typography process-wide; every colour below is drawn from PAL,
+# BAND, BAD and BAND_ALPHA rather than from hard-coded hex values, so the voice
+# pages match the rest of the report instead of being a dark island in it.
+import crat_figures
+from crat_figures import PAL, BAND, BAD, BAND_ALPHA, THRESH_LW
+
+V_DARK = PAL['voice']['dark']       # #6D28D9  primary voice series
+V_MID = PAL['voice']['mid']         # #8B5CF6  secondary voice series
+V_LIGHT = PAL['voice']['light']     # #EDE9FE  fills
+INK = PAL['fusion']['dark']         # titles
+MUTED = PAL['fusion']['mid']        # labels / ticks
+RULE = PAL['fusion']['light']       # spines / grid
+PANEL_BG = 'white'
+
 try:
     from surfboard.sound import Waveform
     SURFBOARD_AVAILABLE = True
@@ -582,47 +597,49 @@ class DementiaAnalyser:
         t     = np.linspace(0, len(signal) / sr, len(signal))
         t_env = np.linspace(0, len(signal) / sr, len(env))
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 6), facecolor='#0d1117')
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 6), facecolor='white')
         title_extra = ""
         if sil_pct is not None and sil_pct > 40:
             title_extra = f"  ⚠ High Silence: {sil_pct:.1f}% (normal < 40%)"
         fig.suptitle(f'Voice Waveform Analysis{title_extra}',
-                     color='white', fontsize=13, fontweight='bold')
+                     color=INK, fontsize=13, fontweight='bold')
 
         for ax in (ax1, ax2):
-            ax.set_facecolor('#161b22')
-            for sp in ax.spines.values():
-                sp.set_edgecolor('#30363d')
-            ax.tick_params(colors='#8b949e')
-            ax.grid(True, color='#30363d', alpha=0.5, linewidth=0.5)
+            ax.set_facecolor(PANEL_BG)
+            for sp in ('top', 'right'):
+                ax.spines[sp].set_visible(False)
+            for sp in ('left', 'bottom'):
+                ax.spines[sp].set_color(RULE)
+            ax.tick_params(colors=MUTED)
+            ax.grid(True, color=RULE, alpha=0.9, linewidth=0.7)
 
         # ── Raw waveform
-        ax1.plot(t, signal, color='#58a6ff', lw=0.5, alpha=0.85, label='Audio Signal')
+        ax1.plot(t, signal, color=V_DARK, lw=0.5, alpha=0.85, label='Audio Signal')
         for s, e in zip(ss, se):
             ts = t_env[min(s, len(t_env)-1)]
             te = t_env[min(e, len(t_env)-1)]
-            ax1.axvspan(ts, te, color='#f85149', alpha=0.20,
+            ax1.axvspan(ts, te, color=BAD, alpha=0.20,
                         label='Silence Region' if s == ss[0] else '_')
-        ax1.set_ylabel('Amplitude', color='#8b949e', fontsize=10)
-        ax1.set_xlabel('Time (seconds)', color='#8b949e', fontsize=9)
+        ax1.set_ylabel('Amplitude', color=MUTED, fontsize=10)
+        ax1.set_xlabel('Time (seconds)', color=MUTED, fontsize=9)
         ax1.set_title('Raw Waveform  (red = silence regions)',
-                      color='#c9d1d9', fontsize=10)
-        ax1.legend(loc='upper right', facecolor='#1c2128',
-                   labelcolor='#c9d1d9', fontsize=8)
+                      color=INK, fontsize=10)
+        ax1.legend(loc='upper right', facecolor='white',
+                   labelcolor=INK, edgecolor=RULE, fontsize=8)
 
         # ── Envelope
-        ax2.plot(t_env, env, color='#3fb950', lw=0.8, label='Signal Envelope')
-        ax2.fill_between(t_env, env, alpha=0.15, color='#3fb950')
-        ax2.set_ylabel('Envelope Amplitude', color='#8b949e', fontsize=10)
-        ax2.set_xlabel('Time (seconds)', color='#8b949e', fontsize=10)
+        ax2.plot(t_env, env, color=V_MID, lw=0.8, label='Signal Envelope')
+        ax2.fill_between(t_env, env, alpha=0.25, color=V_LIGHT)
+        ax2.set_ylabel('Envelope Amplitude', color=MUTED, fontsize=10)
+        ax2.set_xlabel('Time (seconds)', color=MUTED, fontsize=10)
         ax2.set_title('Signal Envelope — Voice Energy Over Time',
-                      color='#c9d1d9', fontsize=10)
-        ax2.legend(loc='upper right', facecolor='#1c2128',
-                   labelcolor='#c9d1d9', fontsize=8)
+                      color=INK, fontsize=10)
+        ax2.legend(loc='upper right', facecolor='white',
+                   labelcolor=INK, edgecolor=RULE, fontsize=8)
 
         plt.tight_layout()
         out = os.path.join(self.output_dir, 'waveform_plot.png')
-        fig.savefig(out, dpi=150, bbox_inches='tight', facecolor='#0d1117')
+        fig.savefig(out, dpi=150, bbox_inches='tight', facecolor='white')
         plt.close(fig)
         print(f"[PLOT] Waveform → {os.path.abspath(out)}")
 
@@ -637,15 +654,17 @@ class DementiaAnalyser:
           4. Top-8 feature Z-score bar chart vs training distribution
         """
         sr = self.sample_rate
-        BG, PANEL = '#0d1117', '#161b22'
-        TITLE_C, TICK_C, SPINE_C = '#c9d1d9', '#8b949e', '#30363d'
-        BLUE, GREEN, RED, GOLD = '#58a6ff', '#3fb950', '#f85149', '#ffd700'
-        ORANGE = '#f0883e'
+        BG, PANEL = 'white', PANEL_BG
+        TITLE_C, TICK_C, SPINE_C = INK, MUTED, RULE
+        # One channel, one hue: every voice series is a shade of the voice
+        # purple; RED is reserved for a flagged / out-of-range value only.
+        BLUE, GREEN, RED, GOLD = V_DARK, V_MID, BAD, V_DARK
+        ORANGE = V_DARK
 
         fig = plt.figure(figsize=(18, 9), facecolor=BG)
         risk_str = ('ELEVATED RISK INDICATORS' if prediction == 1.0
                     else 'LOW RISK INDICATORS')
-        risk_col  = RED if prediction == 1.0 else GREEN
+        risk_col  = BAD if prediction == 1.0 else V_DARK
         fig.suptitle(
             f'Voice Cognitive-Risk Dashboard  —  {risk_str}  '
             f'(P(AD)={proba[1]*100:.1f}%)',
@@ -655,12 +674,15 @@ class DementiaAnalyser:
 
         def _style(ax, title, xlabel, ylabel):
             ax.set_facecolor(PANEL)
-            for sp in ax.spines.values(): sp.set_edgecolor(SPINE_C)
+            for sp in ('top', 'right'):
+                ax.spines[sp].set_visible(False)
+            for sp in ('left', 'bottom'):
+                ax.spines[sp].set_color(SPINE_C)
             ax.tick_params(colors=TICK_C, labelsize=8)
             ax.set_title(title, color=TITLE_C, fontsize=10, fontweight='bold', pad=6)
             ax.set_xlabel(xlabel, color=TICK_C, fontsize=9)
             ax.set_ylabel(ylabel, color=TICK_C, fontsize=9)
-            ax.grid(True, color=SPINE_C, alpha=0.6, linewidth=0.6)
+            ax.grid(True, color=SPINE_C, alpha=0.9, linewidth=0.7)
 
         # ── 1. Pitch (F0) over time ──────────────────────────────────────────
         ax1 = fig.add_subplot(gs[0, 0])
@@ -684,8 +706,8 @@ class DementiaAnalyser:
                 mean_f0 = float(np.mean(f0_valid))
                 ax1.axhline(mean_f0, color=GOLD, lw=1.2, ls='--',
                             label=f'Mean F0 = {mean_f0:.0f} Hz')
-            ax1.legend(facecolor='#1c2128', labelcolor=TITLE_C, fontsize=8,
-                       loc='upper right')
+            ax1.legend(facecolor='white', labelcolor=TITLE_C, edgecolor=RULE,
+                       fontsize=8, loc='upper right')
         except Exception:
             ax1.text(0.5, 0.5, 'Pitch analysis unavailable',
                      ha='center', va='center', transform=ax1.transAxes,
@@ -719,7 +741,7 @@ class DementiaAnalyser:
 
             # Left axis: RMS energy (speech activity)
             ax2.plot(t_rms, rms_curve, color=GREEN, lw=0.9, label='Speech energy (RMS)')
-            ax2.fill_between(t_rms, rms_curve, color=GREEN, alpha=0.15)
+            ax2.fill_between(t_rms, rms_curve, color=V_LIGHT, alpha=0.55)
             ax2.axhline(sil_threshold, color=GREEN, lw=1.0, ls='--', alpha=0.7)
             ax2.set_ylim(0, max(rms_curve.max() * 1.1, 1e-3))
 
@@ -740,8 +762,8 @@ class DementiaAnalyser:
                       label='Vocal brightness (centroid)')
             mean_sc = float(np.mean(sc))
             ax2b.axhline(mean_sc, color=GOLD, lw=1.0, ls=':')
-            ax2b.set_ylabel('Brightness (Hz)', color=ORANGE, fontsize=9)
-            ax2b.tick_params(axis='y', colors=ORANGE, labelsize=8)
+            ax2b.set_ylabel('Brightness (Hz)', color=MUTED, fontsize=9)
+            ax2b.tick_params(axis='y', colors=MUTED, labelsize=8)
             for sp in ax2b.spines.values():
                 sp.set_edgecolor(SPINE_C)
 
@@ -750,7 +772,7 @@ class DementiaAnalyser:
             # combine legends from both axes
             h1, l1 = ax2.get_legend_handles_labels()
             h2, l2 = ax2b.get_legend_handles_labels()
-            ax2.legend(h1 + h2, l1 + l2, facecolor='#1c2128',
+            ax2.legend(h1 + h2, l1 + l2, facecolor='white', edgecolor=RULE,
                        labelcolor=TITLE_C, fontsize=7.5, loc='upper right')
             title2 = (f'Speech Energy & Vocal Brightness  —  '
                       f'{speech_rate:.1f} syl/s ({rate_label}), '
@@ -782,12 +804,12 @@ class DementiaAnalyser:
         ad_v      = [metrics[k][1] for k in labels_v]
         cn_v      = [metrics[k][2] for k in labels_v]
         x = np.arange(len(labels_v)); w = 0.26
-        ax5.bar(x - w, patient_v, w, color=ORANGE,  label='Patient',  alpha=0.9)
-        ax5.bar(x,     ad_v,      w, color=RED,     label='AD avg',   alpha=0.75)
-        ax5.bar(x + w, cn_v,      w, color=GREEN,   label='CN avg',   alpha=0.75)
+        ax5.bar(x - w, patient_v, w, color=V_DARK, label='Patient', alpha=0.95)
+        ax5.bar(x,     ad_v,      w, color=BAD,    label='AD avg',  alpha=0.75)
+        ax5.bar(x + w, cn_v,      w, color=V_MID,  label='CN avg',  alpha=0.75)
         ax5.set_xticks(x)
         ax5.set_xticklabels(labels_v, color=TICK_C, fontsize=9)
-        ax5.legend(facecolor='#1c2128', labelcolor=TITLE_C, fontsize=8)
+        ax5.legend(facecolor='white', labelcolor=TITLE_C, edgecolor=RULE, fontsize=8)
         _style(ax5, 'Voice Stability Pattern (vs AD/CN Reference)',
                'Metric', 'Value')
 
@@ -798,17 +820,20 @@ class DementiaAnalyser:
             (cal[fi[fn]] - TRAINING_STATS[fn][0]) / (TRAINING_STATS[fn][1] + 1e-8)
             for fn in EXCEL_FEATURES
         ])
-        colors_z = [RED if abs(z) > 1.5 else (GOLD if abs(z) > 0.8 else GREEN)
-                    for z in z_scores]
+        # Out-of-range is the reserved red; everything in range is voice-dark.
+        colors_z = [BAD if abs(z) > 1.5 else V_DARK for z in z_scores]
         x_z = np.arange(len(EXCEL_FEATURES))
         bars = ax6.bar(x_z, z_scores, color=colors_z, alpha=0.85, width=0.65)
+        ax6.axhspan(-1.5, 1.5, color=BAND, alpha=BAND_ALPHA, zorder=0)
         ax6.axhline(0,    color=SPINE_C, lw=0.8, ls='--')
-        ax6.axhline( 1.5, color=RED,    lw=0.8, ls=':', label='±1.5σ (abnormal)')
-        ax6.axhline(-1.5, color=RED,    lw=0.8, ls=':')
+        ax6.axhline( 1.5, color=V_DARK, lw=THRESH_LW, ls='--', label='±1.5σ (abnormal)')
+        ax6.axhline(-1.5, color=V_DARK, lw=THRESH_LW, ls='--')
         ax6.set_xticks(x_z)
         ax6.set_xticklabels(EXCEL_FEATURES, rotation=30, ha='right',
                             color=TICK_C, fontsize=7.5)
-        ax6.legend(facecolor='#1c2128', labelcolor=TITLE_C, fontsize=8)
+        for _sp in ('top', 'right'):
+            ax6.spines[_sp].set_visible(False)
+        ax6.legend(facecolor='white', labelcolor=TITLE_C, edgecolor=RULE, fontsize=8)
         _style(ax6, 'Top-8 Discriminant Features — Z-score vs Training',
                'Feature', 'Z-score (σ)')
 
@@ -823,16 +848,17 @@ class DementiaAnalyser:
         raw = raw_f.flatten(); cal = cal_f.flatten()
         idx = self._feat_idx
 
-        fig = plt.figure(figsize=(18, 13), facecolor='#0d1117')
+        fig = plt.figure(figsize=(18, 13), facecolor='white')
         fig.suptitle('Feature Analysis — Voice Dementia Screening',
-                     color='white', fontsize=14, fontweight='bold', y=0.98)
+                     color=INK, fontsize=14, fontweight='bold', y=0.98)
         gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.50, wspace=0.35)
 
         ax1 = fig.add_subplot(gs[0, :])
-        ax1.set_facecolor('#161b22')
-        for sp in ax1.spines.values(): sp.set_edgecolor('#30363d')
-        ax1.tick_params(colors='#8b949e')
-        ax1.grid(True, color='#30363d', alpha=0.5, linewidth=0.5)
+        ax1.set_facecolor(PANEL_BG)
+        for sp in ('top', 'right'): ax1.spines[sp].set_visible(False)
+        for sp in ('left', 'bottom'): ax1.spines[sp].set_color(RULE)
+        ax1.tick_params(colors=MUTED)
+        ax1.grid(True, color=RULE, alpha=0.9, linewidth=0.7)
 
         x = np.arange(len(FEATURE_ORDER))
         def zs(vals):
@@ -841,25 +867,26 @@ class DementiaAnalyser:
         raw_z = zs(raw); cal_z = zs(cal)
 
         w = 0.38
-        ax1.bar(x - w/2, raw_z, w, label='Raw',        color='#58a6ff', alpha=0.75)
-        ax1.bar(x + w/2, cal_z, w, label='Calibrated', color='#3fb950', alpha=0.75)
-        ax1.axhline(0,  color='#8b949e', lw=0.8, ls='--')
-        ax1.axhline( 2, color='#f85149', lw=0.6, ls=':', label='±2σ (abnormal)')
-        ax1.axhline(-2, color='#f85149', lw=0.6, ls=':')
+        ax1.axhspan(-2, 2, color=BAND, alpha=BAND_ALPHA, zorder=0)
+        ax1.bar(x - w/2, raw_z, w, label='Raw',        color=V_MID,  alpha=0.85, zorder=3)
+        ax1.bar(x + w/2, cal_z, w, label='Calibrated', color=V_DARK, alpha=0.95, zorder=3)
+        ax1.axhline(0,  color=MUTED, lw=0.8, ls='--')
+        ax1.axhline( 2, color=V_DARK, lw=THRESH_LW, ls='--', label='±2σ (abnormal)')
+        ax1.axhline(-2, color=V_DARK, lw=THRESH_LW, ls='--')
         ax1.set_xticks(x)
         ax1.set_xticklabels(FEATURE_ORDER, rotation=45, ha='right',
-                            fontsize=7.5, color='#8b949e')
-        ax1.set_ylabel('Z-score (σ)', color='#8b949e', fontsize=10)
-        ax1.set_xlabel('Acoustic Feature', color='#8b949e', fontsize=9)
+                            fontsize=7.5, color=MUTED)
+        ax1.set_ylabel('Z-score (σ)', color=MUTED, fontsize=10)
+        ax1.set_xlabel('Acoustic Feature', color=MUTED, fontsize=9)
         ax1.set_title('All 21 Features — Z-score vs Training Distribution  '
-                      '(gold highlight = saved to Excel)',
-                      color='#c9d1d9', fontsize=10)
-        ax1.legend(facecolor='#1c2128', labelcolor='#c9d1d9', fontsize=8)
+                      '(shaded column = saved to Excel)',
+                      color=INK, fontsize=10)
+        ax1.legend(facecolor='white', labelcolor=INK, edgecolor=RULE, fontsize=8)
         for fn in EXCEL_FEATURES:
-            ax1.axvspan(idx[fn] - 0.5, idx[fn] + 0.5, color='#ffd700', alpha=0.07)
+            ax1.axvspan(idx[fn] - 0.5, idx[fn] + 0.5, color=V_LIGHT, alpha=0.55, zorder=1)
 
         ax2 = fig.add_subplot(gs[1, 0], polar=True)
-        ax2.set_facecolor('#1c2128')
+        ax2.set_facecolor(PANEL_BG)
         labels = EXCEL_FEATURES
         n      = len(labels)
         angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist() + [0]
@@ -876,38 +903,38 @@ class DementiaAnalyser:
         ad_src = [AD_MEANS[fn] for fn in FEATURE_ORDER]
         cn_src = [CN_MEANS[fn] for fn in FEATURE_ORDER]
 
-        ax2.plot(angles, norm_vals(labels, cal),    'o-', lw=2, color='#f0883e', label='Patient')
-        ax2.fill(angles, norm_vals(labels, cal),    alpha=0.15, color='#f0883e')
-        ax2.plot(angles, norm_vals(labels, ad_src), 's--', lw=1.2, color='#f85149', label='AD avg')
-        ax2.plot(angles, norm_vals(labels, cn_src), '^--', lw=1.2, color='#3fb950', label='CN avg')
+        ax2.plot(angles, norm_vals(labels, cal),    'o-', lw=2, color=V_DARK, label='Patient')
+        ax2.fill(angles, norm_vals(labels, cal),    alpha=0.30, color=V_LIGHT)
+        ax2.plot(angles, norm_vals(labels, ad_src), 's--', lw=1.2, color=BAD, label='AD avg')
+        ax2.plot(angles, norm_vals(labels, cn_src), '^--', lw=1.2, color=V_MID, label='CN avg')
         ax2.set_xticks(angles[:-1])
-        ax2.set_xticklabels(labels, fontsize=7.5, color='#c9d1d9')
+        ax2.set_xticklabels(labels, fontsize=7.5, color=MUTED)
         ax2.set_title('Top-8 Discriminant Features\n(normalised radar)',
-                      color='#c9d1d9', fontsize=10, pad=15)
+                      color=INK, fontsize=10, pad=15)
         ax2.legend(loc='upper right', bbox_to_anchor=(1.35, 1.1),
-                   facecolor='#1c2128', labelcolor='#c9d1d9', fontsize=8)
+                   facecolor='white', labelcolor=INK, edgecolor=RULE, fontsize=8)
 
         ax3 = fig.add_subplot(gs[1, 1])
-        ax3.set_facecolor('#161b22'); ax3.axis('off')
-        for sp in ax3.spines.values(): sp.set_edgecolor('#30363d')
+        ax3.set_facecolor(PANEL_BG); ax3.axis('off')
+        for sp in ax3.spines.values(): sp.set_edgecolor(RULE)
 
-        rc = '#f85149' if prediction == 1.0 else '#3fb950'
+        rc = BAD if prediction == 1.0 else V_DARK
         rt = 'DEMENTIA DETECTED' if prediction == 1.0 else 'NO DEMENTIA DETECTED'
         ax3.text(0.5, 0.90, rt, transform=ax3.transAxes,
                  ha='center', fontsize=15, fontweight='bold', color=rc)
         ax3.text(0.5, 0.76, f'P(Dementia) = {proba[1]*100:.1f}%',
-                 transform=ax3.transAxes, ha='center', fontsize=12, color='#f85149')
+                 transform=ax3.transAxes, ha='center', fontsize=12, color=BAD)
         ax3.text(0.5, 0.65, f'P(Normal)   = {proba[0]*100:.1f}%',
-                 transform=ax3.transAxes, ha='center', fontsize=12, color='#3fb950')
+                 transform=ax3.transAxes, ha='center', fontsize=12, color=V_DARK)
         ax3.text(0.5, 0.54, f'Threshold: ≥{self.confidence_threshold*100:.0f}% → Dementia',
-                 transform=ax3.transAxes, ha='center', fontsize=9, color='#8b949e')
+                 transform=ax3.transAxes, ha='center', fontsize=9, color=MUTED)
 
         ax3.text(0.5, 0.42, '── Top Feature Deviations ──',
-                 transform=ax3.transAxes, ha='center', fontsize=8, color='#8b949e')
+                 transform=ax3.transAxes, ha='center', fontsize=8, color=MUTED)
         for ri, fn in enumerate(EXCEL_FEATURES[:6]):
             fi = idx[fn]; mu, std, *_ = TRAINING_STATS[fn]
             z  = (cal[fi] - mu) / (std + 1e-8)
-            c  = '#f85149' if z > 1.5 else ('#ffd700' if z > 0.8 else '#3fb950')
+            c  = BAD if z > 1.5 else V_DARK
             ax3.text(0.5, 0.34 - ri * 0.048,
                      f'{fn:<16s}  z={z:+.2f}',
                      transform=ax3.transAxes, ha='center',
@@ -917,10 +944,10 @@ class DementiaAnalyser:
                  '⚠  Screening tool only — not a medical diagnosis.\n'
                  'Consult a neurologist for clinical evaluation.',
                  transform=ax3.transAxes, ha='center', fontsize=7.5,
-                 color='#8b949e', style='italic')
+                 color=MUTED, style='italic')
 
         fig.savefig(os.path.join(self.output_dir, 'feature_plot.png'),
-                    dpi=150, bbox_inches='tight', facecolor='#0d1117')
+                    dpi=150, bbox_inches='tight', facecolor='white')
         plt.close(fig)
         print(f"[PLOT] Feature chart → {os.path.abspath(os.path.join(self.output_dir, 'feature_plot.png'))}")
 

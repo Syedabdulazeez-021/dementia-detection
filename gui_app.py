@@ -52,6 +52,27 @@ from gui_adapter import GUIDementiaAnalyzer
 # Import unified risk scoring (gaze score + overall fusion)
 from scoring import compute_gaze_score, compute_overall_score, explain_scores, risk_level as _risk_level, load_modality_model, ml_modality_score
 
+# Shared CRAT figure style + the split blink/gaze figures. Importing
+# crat_figures calls apply_style(), which sets the shared typography and the
+# one-channel-one-hue palette process-wide for every figure drawn afterwards.
+import crat_figures
+from crat_figures import PAL, BAND, BAD, BAND_ALPHA, THRESH_LW, blink_figure, gaze_figure
+from crat_events import SessionEvents
+
+# Channel hues, used everywhere a modality needs a colour.
+MOD_COLORS = {'eye': PAL['blink']['dark'],
+              'gaze': PAL['gaze']['dark'],
+              'voice': PAL['voice']['dark']}
+
+# Filenames for the two split figures, written next to this module.
+BLINK_FIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fig_blink.png')
+GAZE_FIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fig_gaze.png')
+
+# Per-trial response window in the gaze experiment, measured from stimulus
+# onset. A trial with no LEFT/RIGHT response within this window completes as
+# incorrect with no response, instead of blocking the loop indefinitely.
+GAZE_TRIAL_TIMEOUT_S = 3.0
+
 
 class DementiaDetectionGUI:
     """Main GUI Application for Dementia Detection System"""
@@ -511,36 +532,36 @@ class DementiaDetectionGUI:
         
         # Create matplotlib figures (styled like the web UI)
         self.fig1 = Figure(figsize=(6, 3), dpi=100)
-        self.fig1.patch.set_facecolor('#f4f7fe')
+        self.fig1.patch.set_facecolor('white')
         self.ax1 = self.fig1.add_subplot(111)
-        self.ax1.set_title('Eye Openness Over Time', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': '#555'})
+        self.ax1.set_title('Eye Openness Over Time', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': PAL['fusion']['dark']})
         self.ax1.set_ylim(0, 0.5)
-        self.ax1.grid(True, alpha=0.3, color='#ccd')
-        self.ax1.set_facecolor('#f4f7fe')
+        self.ax1.grid(True, alpha=0.3, color=PAL['fusion']['light'])
+        self.ax1.set_facecolor('white')
         self.ax1.spines['top'].set_visible(False)
         self.ax1.spines['right'].set_visible(False)
-        self.ax1.spines['left'].set_color('#ccd')
-        self.ax1.spines['bottom'].set_color('#ccd')
-        self.ax1.tick_params(axis='x', colors='#666', labelsize=8)
-        self.ax1.tick_params(axis='y', colors='#666', labelsize=8)
+        self.ax1.spines['left'].set_color(PAL['fusion']['light'])
+        self.ax1.spines['bottom'].set_color(PAL['fusion']['light'])
+        self.ax1.tick_params(axis='x', colors=PAL['fusion']['mid'], labelsize=8)
+        self.ax1.tick_params(axis='y', colors=PAL['fusion']['mid'], labelsize=8)
         self.fig1.subplots_adjust(bottom=0.25, left=0.15, top=0.8)
         
         self.canvas1 = FigureCanvasTkAgg(self.fig1, graphs_container)
         self.canvas1.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
         
         self.fig2 = Figure(figsize=(6, 3), dpi=100)
-        self.fig2.patch.set_facecolor('#f4f7fe')
+        self.fig2.patch.set_facecolor('white')
         self.ax2 = self.fig2.add_subplot(111)
-        self.ax2.set_title('Blink Pattern', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': '#555'})
+        self.ax2.set_title('Blink Pattern', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': PAL['fusion']['dark']})
         self.ax2.set_ylim(0, 1.0)
-        self.ax2.grid(True, alpha=0.3, color='#ccd')
-        self.ax2.set_facecolor('#f4f7fe')
+        self.ax2.grid(True, alpha=0.3, color=PAL['fusion']['light'])
+        self.ax2.set_facecolor('white')
         self.ax2.spines['top'].set_visible(False)
         self.ax2.spines['right'].set_visible(False)
-        self.ax2.spines['left'].set_color('#ccd')
-        self.ax2.spines['bottom'].set_color('#ccd')
-        self.ax2.tick_params(axis='x', colors='#666', labelsize=8)
-        self.ax2.tick_params(axis='y', colors='#666', labelsize=8)
+        self.ax2.spines['left'].set_color(PAL['fusion']['light'])
+        self.ax2.spines['bottom'].set_color(PAL['fusion']['light'])
+        self.ax2.tick_params(axis='x', colors=PAL['fusion']['mid'], labelsize=8)
+        self.ax2.tick_params(axis='y', colors=PAL['fusion']['mid'], labelsize=8)
         self.fig2.subplots_adjust(bottom=0.25, left=0.15, top=0.8)
         
         self.canvas2 = FigureCanvasTkAgg(self.fig2, graphs_container)
@@ -658,12 +679,19 @@ class DementiaDetectionGUI:
             "accuracy": 0,
             "trials": 0,
             "reaction_times": [],
-            "saccade_speeds": []
+            "saccade_speeds": [],
+            # One peak speed per completed trial (presentational). The gaze
+            # score still uses the mean of saccade_speeds, unchanged.
+            "v_peaks": []
         }
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = None
         self.gaze_fs_win = None
         self.gaze_fs_label = None
+        # Per-session gaze event collector; created here so the results page and
+        # the report can read an empty collector before any trial has run.
+        self.gaze_events = SessionEvents()
+        self._trial_speed_start = 0
 
     def setup_results_panel(self, parent):
         """Setup Page 3: Final Results and Export Panel"""
@@ -899,12 +927,12 @@ class DementiaDetectionGUI:
             
             self.ax1.clear()
             # Plot Left and Right EAR
-            self.ax1.plot(frames, left_values, color='#3498db', linewidth=1.5, label='Left Eye EAR')
-            self.ax1.plot(frames, right_values, color='#9b59b6', linewidth=1.5, label='Right Eye EAR')
-            
-            # Plot threshold
+            self.ax1.plot(frames, left_values, color=PAL['blink']['dark'], linewidth=1.5, label='Left Eye EAR')
+            self.ax1.plot(frames, right_values, color=PAL['blink']['mid'], linewidth=1.5, label='Right Eye EAR')
+
+            # Plot threshold — dashed, THRESH_LW, channel dark
             thresh_percent = ear_to_percent(metrics.get('current_threshold', 0.25))
-            self.ax1.axhline(y=thresh_percent, color='red', linestyle='--', linewidth=1.5, label='Adaptive Blink Threshold')
+            self.ax1.axhline(y=thresh_percent, color=PAL['blink']['dark'], linestyle='--', linewidth=THRESH_LW, label='Adaptive Blink Threshold')
             
             # Draw Micro-Sleep Warning Zones (Red Axvspans)
             micro_sleeps = metrics.get('micro_sleeps', [])
@@ -917,7 +945,7 @@ class DementiaDetectionGUI:
                         start_idx = min(range(len(ear_data)), key=lambda i: abs(ear_data[i]['timestamp'] - max(ms['start'], min_time)))
                         end_idx = min(range(len(ear_data)), key=lambda i: abs(ear_data[i]['timestamp'] - min(ms['end'], max_time)))
                         if start_idx != end_idx:
-                            self.ax1.axvspan(start_idx, end_idx, color='red', alpha=0.3, label='Micro-Sleep (>0.5s)' if 'Micro-Sleep (>0.5s)' not in self.ax1.get_legend_handles_labels()[1] else "")
+                            self.ax1.axvspan(start_idx, end_idx, color=BAD, alpha=0.3, label='Micro-Sleep (>0.5s)' if 'Micro-Sleep (>0.5s)' not in self.ax1.get_legend_handles_labels()[1] else "")
             
             # Mark Partial Blinks if they fall inside the current x-axis window
             if partial_blinks:
@@ -934,18 +962,18 @@ class DementiaDetectionGUI:
                         pb_y.append(ear_to_percent(pb['min_ear']))
                 
                 if pb_x:
-                    self.ax1.scatter(pb_x, pb_y, color='#e67e22', marker='^', s=40, zorder=5, label='Partial Blink')
+                    self.ax1.scatter(pb_x, pb_y, color=PAL['blink']['mid'], marker='v', s=40, zorder=5, label='Partial Blink')
             
-            self.ax1.set_title('Eye Openness Over Time (L/R Split)', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': '#555'})
+            self.ax1.set_title('Eye Openness Over Time (L/R Split)', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': PAL['fusion']['dark']})
             self.ax1.set_ylim(0, 100)
-            self.ax1.set_ylabel('Eye openness (%)', fontsize=9, color='#555')
-            self.ax1.grid(True, alpha=0.3, color='#ccd')
-            
+            self.ax1.set_ylabel('Eye openness (%)', fontsize=9, color=PAL['fusion']['mid'])
+            self.ax1.grid(True, alpha=0.3, color=PAL['fusion']['light'])
+
             # Re-apply styling that gets cleared
             self.ax1.spines['top'].set_visible(False)
             self.ax1.spines['right'].set_visible(False)
-            self.ax1.spines['left'].set_color('#ccd')
-            self.ax1.spines['bottom'].set_color('#ccd')
+            self.ax1.spines['left'].set_color(PAL['fusion']['light'])
+            self.ax1.spines['bottom'].set_color(PAL['fusion']['light'])
             
             # Set rotated x ticks
             self.ax1.set_xticks(frames[::2])
@@ -962,22 +990,22 @@ class DementiaDetectionGUI:
             self.ax2.clear()
             
             x_pos = np.arange(len(intervals))
-            colors = ['#2ecc71' if 2.0 <= interval <= 6.0 else '#e74c3c' for interval in intervals]
-            
+            colors = [PAL['blink']['dark'] if 2.0 <= interval <= 6.0 else BAD for interval in intervals]
+
             # Shade the normal inter-blink interval band (2-6 s) for context
-            self.ax2.axhspan(2.0, 6.0, color='#2ecc71', alpha=0.10, label='Normal (2-6s)')
+            self.ax2.axhspan(2.0, 6.0, color=BAND, alpha=BAND_ALPHA, label='Normal (2-6s)')
             self.ax2.bar(x_pos, intervals, color=colors, alpha=0.9, width=0.7, label='Interval (s)')
             
-            self.ax2.set_title('Blink Regularity (Interval)', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': '#555'})
-            self.ax2.set_ylabel('Interval (s)', fontsize=9, color='#555')
+            self.ax2.set_title('Blink Regularity (Interval)', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': PAL['fusion']['dark']})
+            self.ax2.set_ylabel('Interval (s)', fontsize=9, color=PAL['fusion']['mid'])
             self.ax2.set_ylim(0, max(5.0, max(intervals) * 1.2))
-            self.ax2.grid(True, alpha=0.3, color='#ccd')
-            
+            self.ax2.grid(True, alpha=0.3, color=PAL['fusion']['light'])
+
             # Re-apply styling
             self.ax2.spines['top'].set_visible(False)
             self.ax2.spines['right'].set_visible(False)
-            self.ax2.spines['left'].set_color('#ccd')
-            self.ax2.spines['bottom'].set_color('#ccd')
+            self.ax2.spines['left'].set_color(PAL['fusion']['light'])
+            self.ax2.spines['bottom'].set_color(PAL['fusion']['light'])
             
             # Setup x-axis labels
             labels = [f"Blink {i+1}" for i in range(len(intervals))]
@@ -1109,7 +1137,10 @@ class DementiaDetectionGUI:
             "accuracy": 0,
             "trials": 0,
             "reaction_times": [],
-            "saccade_speeds": []
+            "saccade_speeds": [],
+            # One peak speed per completed trial (presentational). The gaze
+            # score still uses the mean of saccade_speeds, unchanged.
+            "v_peaks": []
         }
         self._last_gaze_plot_n = -1
         
@@ -1132,6 +1163,18 @@ class DementiaDetectionGUI:
         self.fixation_time = 0
         self.prev_eye_x = None
         self.prev_time = None
+
+        # Per-session gaze events (in-memory only). Created where the trial
+        # counters above are zeroed, and reset in case the object is reused.
+        if getattr(self, 'gaze_events', None) is None:
+            self.gaze_events = SessionEvents()
+        else:
+            self.gaze_events.reset()
+
+        # Index into gaze_results["saccade_speeds"] at which the current trial's
+        # samples begin. V_peak for a trial is the max over that slice; the
+        # per-frame speed computation itself is untouched.
+        self._trial_speed_start = 0
         
         self.gaze_thread = threading.Thread(target=self.gaze_capture_loop, daemon=True)
         self.gaze_thread.start()
@@ -1252,6 +1295,18 @@ class DementiaDetectionGUI:
                         if time.time() - self.fixation_time > random.uniform(1.5, 2.5):
                             self.current_stimulus = random.choice(["LEFT", "RIGHT"])
                             self.stimulus_time = time.time()
+                            # Mark where this trial's speed samples start, so
+                            # V_peak is taken over this trial's slice only.
+                            self._trial_speed_start = len(self.gaze_results["saccade_speeds"])
+                            # Drop the previous trial's iris position. It was
+                            # last sampled before the 1.5-2.5 s fixation gap, so
+                            # carrying it over made the first speed sample of
+                            # every trial divide a displacement by a dt spanning
+                            # that whole gap — one artificially near-zero sample
+                            # per trial. The `prev_eye_x is not None` guard below
+                            # skips the first frame after this reset instead.
+                            self.prev_eye_x = None
+                            self.prev_time = None
                             self.gaze_experiment_state = "STIMULUS"
                             
                     elif self.gaze_experiment_state == "STIMULUS":
@@ -1260,6 +1315,12 @@ class DementiaDetectionGUI:
                         if self.current_stimulus == "RIGHT":
                             cv2.circle(frame, (w - 80, h//2), 40, (0, 0, 255), -1)
                             
+                        # A trial now completes on ANY classified response, not
+                        # only a correct one, or on timeout.
+                        response = None
+                        reaction = None
+                        responded = False
+
                         if mesh_points is not None:
                             ratio = self.get_ratio(mesh_points)
                             gaze_dir = "CENTER"
@@ -1267,11 +1328,11 @@ class DementiaDetectionGUI:
                                 gaze_dir = "LEFT"
                             elif ratio > (self.right_thresh + self.center_thresh) / 2:
                                 gaze_dir = "RIGHT"
-                                
+
                             eye_x = np.mean([mesh_points[474][0], mesh_points[469][0]])
                             current_time = time.time()
                             speed = 0
-                            
+
                             if self.prev_eye_x is not None:
                                 dist = abs(eye_x - self.prev_eye_x)
                                 dt = current_time - self.prev_time
@@ -1279,29 +1340,29 @@ class DementiaDetectionGUI:
                                     speed = dist / dt
                                     self.gaze_results["saccade_speeds"].append(speed)
                                     self.last_saccade_speed = speed
-                                    
+
                             self.prev_eye_x = eye_x
                             self.prev_time = current_time
-                            
+
                             self.current_gaze_dir = gaze_dir
-                            
-                            if gaze_dir == self.current_stimulus:
+
+                            # "CENTER" is the unclassified default — it is not a
+                            # response and must not complete the trial.
+                            if gaze_dir in ("LEFT", "RIGHT"):
+                                response = gaze_dir
                                 reaction = time.time() - self.stimulus_time
-                                self.gaze_results["reaction_times"].append(reaction)
-                                self.last_reaction_time = reaction
-                                
-                                self.trial_count += 1
-                                self.correct_trials += 1
-                                
-                                if self.trial_count >= self.total_trials:
-                                    # Set the state BEFORE clearing the flag: the UI
-                                    # loop exits on `not gaze_running`, so it must
-                                    # already see "FINISHED" on that final pass.
-                                    self.gaze_experiment_state = "FINISHED"
-                                    self.gaze_running = False
-                                else:
-                                    self.gaze_experiment_state = "FIXATION"
-                                    self.fixation_time = time.time()
+                                responded = True
+
+                        # Timeout is checked even when no face was detected, so
+                        # a participant who looks away cannot stall the loop.
+                        timed_out = (not responded and
+                                     (time.time() - self.stimulus_time) >= GAZE_TRIAL_TIMEOUT_S)
+
+                        if responded or timed_out:
+                            # A timed-out trial contributes no reaction time: a
+                            # non-response is not a latency measurement.
+                            self._complete_gaze_trial(
+                                response, reaction if responded else None)
                     
                     self.current_gaze_frame = frame
 
@@ -1315,6 +1376,49 @@ class DementiaDetectionGUI:
                 self.gaze_cap = None
         except Exception:
             pass
+
+    def _complete_gaze_trial(self, response, reaction):
+        """Close out one gaze trial and advance the state machine.
+
+        Called for EVERY completed trial — correct, incorrect, or timed out.
+        Previously this work sat inside the `gaze_dir == current_stimulus`
+        branch, so a wrong or absent response never advanced `trial_count` and
+        accuracy was structurally pinned at 100 %.
+
+        Args:
+            response: "LEFT" / "RIGHT", or None if the trial timed out
+            reaction: seconds from stimulus onset, or None for a timeout
+                      (a non-response must not enter the latency distribution)
+        """
+        if reaction is not None:
+            self.gaze_results["reaction_times"].append(reaction)
+            self.last_reaction_time = reaction
+
+        self.trial_count += 1
+        if response is not None and response == self.current_stimulus:
+            self.correct_trials += 1
+
+        # V_peak = highest V(t) recorded during this trial. How V(t) itself is
+        # computed is unchanged; this only takes a max over the slice of
+        # samples belonging to this trial. An empty slice (e.g. a timeout with
+        # no face detected) yields 0.0.
+        _tslice = self.gaze_results["saccade_speeds"][self._trial_speed_start:]
+        v_peak = max(_tslice) if _tslice else 0.0
+        self.gaze_results.setdefault("v_peaks", []).append(v_peak)
+
+        # Strings are converted to -1/+1 by _side() in crat_events, at this
+        # call site; None passes through as "no response".
+        self.gaze_events.log_trial(self.current_stimulus, response, v_peak)
+
+        if self.trial_count >= self.total_trials:
+            # Set the state BEFORE clearing the flag: the UI loop exits on
+            # `not gaze_running`, so it must already see "FINISHED" on that
+            # final pass.
+            self.gaze_experiment_state = "FINISHED"
+            self.gaze_running = False
+        else:
+            self.gaze_experiment_state = "FIXATION"
+            self.fixation_time = time.time()
 
     def update_gaze_ui_loop(self):
         """Update Gaze UI with frames and metrics"""
@@ -1381,17 +1485,17 @@ class DementiaDetectionGUI:
         """Draw the empty gaze graphs with healthy-range guides before any trials."""
         for ax in (self.ax_gaze_rt, self.ax_gaze_ss):
             ax.clear()
-        self.ax_gaze_rt.set_title("Reaction Time per Trial", fontsize=10, fontweight='bold', color='#555')
-        self.ax_gaze_rt.axhspan(0, 0.5, color='#2ecc71', alpha=0.12)
-        self.ax_gaze_rt.axhline(0.5, color='#2ecc71', ls='--', lw=1)
-        self.ax_gaze_rt.text(0.02, 0.5, "healthy \u2264 0.5 s", fontsize=7, color='#2ecc71',
+        self.ax_gaze_rt.set_title("Reaction Time per Trial", fontsize=10, fontweight='bold', color=PAL['fusion']['dark'])
+        self.ax_gaze_rt.axhspan(0, 0.5, color=BAND, alpha=BAND_ALPHA)
+        self.ax_gaze_rt.axhline(0.5, color=PAL['gaze']['dark'], ls='--', lw=THRESH_LW)
+        self.ax_gaze_rt.text(0.02, 0.5, "healthy \u2264 0.5 s", fontsize=7, color=PAL['gaze']['dark'],
                              transform=self.ax_gaze_rt.transAxes, va='bottom')
         self.ax_gaze_rt.set_ylabel("seconds", fontsize=8)
         self.ax_gaze_rt.set_xlabel("trial", fontsize=8)
 
-        self.ax_gaze_ss.set_title("Saccade Speed (movement samples)", fontsize=10, fontweight='bold', color='#555')
-        self.ax_gaze_ss.axhline(300, color='#2ecc71', ls='--', lw=1)
-        self.ax_gaze_ss.text(0.02, 0.86, "healthy \u2265 300 px/s", fontsize=7, color='#2ecc71',
+        self.ax_gaze_ss.set_title("Saccade Speed (movement samples)", fontsize=10, fontweight='bold', color=PAL['fusion']['dark'])
+        self.ax_gaze_ss.axhline(300, color=PAL['gaze']['dark'], ls='--', lw=THRESH_LW)
+        self.ax_gaze_ss.text(0.02, 0.86, "healthy \u2265 300 px/s", fontsize=7, color=PAL['gaze']['dark'],
                              transform=self.ax_gaze_ss.transAxes, va='top')
         self.ax_gaze_ss.set_ylabel("px / s", fontsize=8)
         self.ax_gaze_ss.set_xlabel("sample", fontsize=8)
@@ -1403,31 +1507,33 @@ class DementiaDetectionGUI:
         """Refresh the live gaze graphs from the current trial data."""
         rt = list(self.gaze_results.get("reaction_times", []))
         ss = list(self.gaze_results.get("saccade_speeds", []))
-        GAZE = '#f39c12'
+        GAZE = PAL['gaze']['mid']
 
         self.ax_gaze_rt.clear()
-        self.ax_gaze_rt.set_title("Reaction Time per Trial", fontsize=10, fontweight='bold', color='#555')
-        self.ax_gaze_rt.axhspan(0, 0.5, color='#2ecc71', alpha=0.12)
-        self.ax_gaze_rt.axhline(0.5, color='#2ecc71', ls='--', lw=1)
+        self.ax_gaze_rt.set_title("Reaction Time per Trial", fontsize=10, fontweight='bold', color=PAL['fusion']['dark'])
+        self.ax_gaze_rt.axhspan(0, 0.5, color=BAND, alpha=BAND_ALPHA)
+        self.ax_gaze_rt.axhline(0.5, color=PAL['gaze']['dark'], ls='--', lw=THRESH_LW)
         if rt:
             x = list(range(1, len(rt) + 1))
-            self.ax_gaze_rt.plot(x, rt, '-o', color=GAZE, lw=1.6, ms=5)
+            self.ax_gaze_rt.plot(x, rt, '-', color=GAZE, lw=1.6)
+            self.ax_gaze_rt.scatter(x, rt, s=30, zorder=5,
+                                    c=[PAL['gaze']['dark'] if v <= 0.5 else BAD for v in rt])
             self.ax_gaze_rt.set_xticks(x)
             avg = sum(rt) / len(rt)
-            self.ax_gaze_rt.axhline(avg, color='#c0392b', ls=':', lw=1)
-            self.ax_gaze_rt.text(0.98, 0.92, f"avg {avg:.2f}s", fontsize=7, color='#c0392b',
+            self.ax_gaze_rt.axhline(avg, color=PAL['gaze']['dark'], ls=':', lw=1)
+            self.ax_gaze_rt.text(0.98, 0.92, f"avg {avg:.2f}s", fontsize=7, color=PAL['fusion']['mid'],
                                  ha='right', va='top', transform=self.ax_gaze_rt.transAxes)
         self.ax_gaze_rt.set_ylabel("seconds", fontsize=8)
         self.ax_gaze_rt.set_xlabel("trial", fontsize=8)
 
         self.ax_gaze_ss.clear()
-        self.ax_gaze_ss.set_title("Saccade Speed (movement samples)", fontsize=10, fontweight='bold', color='#555')
-        self.ax_gaze_ss.axhline(300, color='#2ecc71', ls='--', lw=1)
+        self.ax_gaze_ss.set_title("Saccade Speed (movement samples)", fontsize=10, fontweight='bold', color=PAL['fusion']['dark'])
+        self.ax_gaze_ss.axhline(300, color=PAL['gaze']['dark'], ls='--', lw=THRESH_LW)
         if ss:
             self.ax_gaze_ss.plot(range(1, len(ss) + 1), ss, color=GAZE, lw=1.0, alpha=0.85)
             avg_ss = sum(ss) / len(ss)
-            self.ax_gaze_ss.axhline(avg_ss, color='#c0392b', ls=':', lw=1)
-            self.ax_gaze_ss.text(0.98, 0.92, f"avg {avg_ss:.0f} px/s", fontsize=7, color='#c0392b',
+            self.ax_gaze_ss.axhline(avg_ss, color=PAL['gaze']['dark'], ls=':', lw=1)
+            self.ax_gaze_ss.text(0.98, 0.92, f"avg {avg_ss:.0f} px/s", fontsize=7, color=PAL['fusion']['mid'],
                                  ha='right', va='top', transform=self.ax_gaze_ss.transAxes)
         self.ax_gaze_ss.set_ylabel("px / s", fontsize=8)
         self.ax_gaze_ss.set_xlabel("sample", fontsize=8)
@@ -1633,11 +1739,11 @@ class DementiaDetectionGUI:
             ear_times = [datetime.fromtimestamp(e['timestamp']).strftime('%H:%M:%S') for e in ear_history]
             frames = list(range(len(ear_history)))
             
-            self.ax_final1.plot(frames, left_values, color='#3498db', linewidth=1.0, alpha=0.8, label='Left Eye (%)')
-            self.ax_final1.plot(frames, right_values, color='#9b59b6', linewidth=1.0, alpha=0.8, label='Right Eye (%)')
+            self.ax_final1.plot(frames, left_values, color=PAL['blink']['dark'], linewidth=1.0, alpha=0.8, label='Left Eye (%)')
+            self.ax_final1.plot(frames, right_values, color=PAL['blink']['mid'], linewidth=1.0, alpha=0.8, label='Right Eye (%)')
             
             thresh_percent = ear_to_percent(self.final_metrics.get('current_threshold', 0.25))
-            self.ax_final1.axhline(y=thresh_percent, color='red', linestyle='--', linewidth=1.5, label='Adaptive Blink Threshold')
+            self.ax_final1.axhline(y=thresh_percent, color=PAL['blink']['dark'], linestyle='--', linewidth=THRESH_LW, label='Adaptive Blink Threshold')
             
             # Draw Micro-Sleep Warning Zones
             micro_sleeps = self.final_metrics.get('micro_sleeps', [])
@@ -1646,7 +1752,7 @@ class DementiaDetectionGUI:
                     start_idx = min(range(len(ear_history)), key=lambda i: abs(ear_history[i]['timestamp'] - ms['start']))
                     end_idx = min(range(len(ear_history)), key=lambda i: abs(ear_history[i]['timestamp'] - ms['end']))
                     if start_idx != end_idx:
-                        self.ax_final1.axvspan(start_idx, end_idx, color='red', alpha=0.3, label='Micro-Sleep (>0.5s)' if 'Micro-Sleep (>0.5s)' not in self.ax_final1.get_legend_handles_labels()[1] else "")
+                        self.ax_final1.axvspan(start_idx, end_idx, color=BAD, alpha=0.3, label='Micro-Sleep (>0.5s)' if 'Micro-Sleep (>0.5s)' not in self.ax_final1.get_legend_handles_labels()[1] else "")
             
             if partial_blinks:
                 pb_x = []
@@ -1657,7 +1763,7 @@ class DementiaDetectionGUI:
                     pb_y.append(ear_to_percent(pb['min_ear']))
                 
                 if pb_x:
-                    self.ax_final1.scatter(pb_x, pb_y, color='#e67e22', marker='^', s=30, zorder=5, label='Partial Blink')
+                    self.ax_final1.scatter(pb_x, pb_y, color=PAL['blink']['mid'], marker='v', s=30, zorder=5, label='Partial Blink')
             
             self.ax_final1.set_title('Final Eye Openness Over Time (L/R Split)', fontdict={'fontsize': 10})
             self.ax_final1.set_ylim(0, 100)
@@ -1679,11 +1785,11 @@ class DementiaDetectionGUI:
             intervals = np.diff(blink_times)
             x_pos = np.arange(len(intervals))
             
-            colors = ['#2ecc71' if 2.0 <= interval <= 6.0 else '#e74c3c' for interval in intervals]
+            colors = [PAL['blink']['dark'] if 2.0 <= interval <= 6.0 else BAD for interval in intervals]
             
             y_top = max(5.0, max(intervals) * 1.2)
             # Shade the normal inter-blink interval band (2-6 s)
-            self.ax_final2.axhspan(2.0, 6.0, color='#2ecc71', alpha=0.10,
+            self.ax_final2.axhspan(2.0, 6.0, color=BAND, alpha=BAND_ALPHA,
                                    label='Normal interval (2-6s)')
             self.ax_final2.bar(x_pos, intervals, color=colors, width=0.5, label='Interval (s)')
             self.ax_final2.set_title('Final Blink Regularity (Intervals)', fontdict={'fontsize': 10})
@@ -1708,16 +1814,15 @@ class DementiaDetectionGUI:
             x_pos = np.arange(len(rt_data))
             mean_rt = float(np.mean(rt_data))
             # Colour each trial by whether it is within a healthy latency
-            bar_colors = ['#2ecc71' if v <= 0.5 else '#f39c12' if v <= 1.0 else '#e74c3c'
-                          for v in rt_data]
-            self.ax_final3.plot(x_pos, rt_data, color='#f39c12', marker='o',
+            bar_colors = [PAL['gaze']['dark'] if v <= 0.5 else BAD for v in rt_data]
+            self.ax_final3.plot(x_pos, rt_data, color=PAL['gaze']['mid'], marker='o',
                                 linewidth=2.0, zorder=3, label='Reaction Time')
             self.ax_final3.scatter(x_pos, rt_data, color=bar_colors, s=45, zorder=4)
             # Normal-latency reference band (<= 0.5 s) and mean line
-            self.ax_final3.axhspan(0, 0.5, color='#2ecc71', alpha=0.12,
+            self.ax_final3.axhspan(0, 0.5, color=BAND, alpha=BAND_ALPHA,
                                    label='Normal (≤0.5s)')
-            self.ax_final3.axhline(mean_rt, color='#8e44ad', linestyle='--',
-                                   linewidth=1.3, label=f'Mean {mean_rt:.2f}s')
+            self.ax_final3.axhline(mean_rt, color=PAL['gaze']['dark'], linestyle='--',
+                                   linewidth=THRESH_LW, label=f'Mean {mean_rt:.2f}s')
             self.ax_final3.set_title('Gaze Reaction Time per Trial', fontdict={'fontsize': 10})
             self.ax_final3.set_xlabel('Trial', fontsize=9)
             self.ax_final3.set_ylabel('Reaction time (s)', fontsize=9)
@@ -1729,43 +1834,56 @@ class DementiaDetectionGUI:
             self.fig_final3.subplots_adjust(bottom=0.3)
         else:
             self.ax_final3.text(0.5, 0.5, 'Gaze test not run', ha='center', va='center',
-                                fontsize=11, color='#a0aec0', transform=self.ax_final3.transAxes)
+                                fontsize=11, color=PAL['fusion']['mid'], transform=self.ax_final3.transAxes)
             self.ax_final3.set_title('Gaze Reaction Time per Trial', fontdict={'fontsize': 10})
         self.canvas_final3.draw()
         
-        # Gaze Graph 4: Saccade Speed
+        # Gaze Graph 4: Peak saccade speed — ONE BAR PER TRIAL.
+        # This previously plotted gaze_results['saccade_speeds'], which is a flat
+        # list of PER-FRAME samples, while labelling the x-axis T1..Tn — so a
+        # 10-trial run drew ~47 bars. It now plots one V_peak per trial, taken
+        # from the per-session event collector. Plotting correction only: the
+        # gaze score still uses the mean of the per-frame list, unchanged.
         self.ax_final4.clear()
-        ss_data = gaze.get('saccade_speeds', [])
-        if ss_data:
-            x_pos = np.arange(len(ss_data))
-            mean_ss = float(np.mean(ss_data))
-            # Slow saccades (low speed) are the concern -> colour them red
-            bar_colors = ['#e74c3c' if v < 100 else '#f39c12' if v < 300 else '#2ecc71'
-                          for v in ss_data]
-            self.ax_final4.bar(x_pos, ss_data, color=bar_colors, width=0.5, label='Saccade speed')
-            self.ax_final4.axhline(mean_ss, color='#8e44ad', linestyle='--',
-                                   linewidth=1.3, label=f'Mean {mean_ss:.0f} px/s')
-            self.ax_final4.axhspan(300, max(300, max(ss_data) * 1.2), color='#2ecc71',
-                                   alpha=0.10, label='Healthy (≥300 px/s)')
-            self.ax_final4.set_title('Saccade Speed per Trial', fontdict={'fontsize': 10})
+        vp_data = list(getattr(self, 'gaze_events', None).v_peaks()) if getattr(self, 'gaze_events', None) else []
+        if not vp_data:
+            vp_data = list(gaze.get('v_peaks', []) or [])
+        if vp_data:
+            x_pos = np.arange(len(vp_data))
+            bar_colors = [PAL['gaze']['dark'] if v >= 300 else BAD for v in vp_data]
+            self.ax_final4.bar(x_pos, vp_data, color=bar_colors, width=0.5,
+                               label='V_peak per trial')
+            self.ax_final4.axhline(300, color=PAL['gaze']['dark'], linestyle='--',
+                                   linewidth=THRESH_LW, label='Healthy ≥ 300 px/s')
+            self.ax_final4.set_title('Peak Saccade Speed per Trial (V_peak)',
+                                     fontdict={'fontsize': 10})
             self.ax_final4.set_xlabel('Trial', fontsize=9)
-            self.ax_final4.set_ylabel('Speed (px/s)', fontsize=9)
-            self.ax_final4.set_ylim(0, max(100, max(ss_data) * 1.2))
+            self.ax_final4.set_ylabel('V_peak (px/s)', fontsize=9)
+            self.ax_final4.set_ylim(0, max(330.0, max(vp_data) * 1.25))
             self.ax_final4.grid(True, alpha=0.3)
             self.ax_final4.set_xticks(x_pos)
-            self.ax_final4.set_xticklabels([f"T{i+1}" for i in range(len(ss_data))], fontsize=6)
+            self.ax_final4.set_xticklabels([f"T{i+1}" for i in range(len(vp_data))], fontsize=6)
             self.ax_final4.legend(loc='upper right', fontsize=7)
             self.fig_final4.subplots_adjust(bottom=0.3)
         else:
             self.ax_final4.text(0.5, 0.5, 'Gaze test not run', ha='center', va='center',
-                                fontsize=11, color='#a0aec0', transform=self.ax_final4.transAxes)
-            self.ax_final4.set_title('Saccade Speed per Trial', fontdict={'fontsize': 10})
+                                fontsize=11, color=PAL['fusion']['mid'], transform=self.ax_final4.transAxes)
+            self.ax_final4.set_title('Peak Saccade Speed per Trial (V_peak)',
+                                     fontdict={'fontsize': 10})
         self.canvas_final4.draw()
+
+        # Write the two split channel figures at 300 dpi, so the report and the
+        # standalone deliverables are the same rendering.
+        try:
+            self.render_channel_figures(self.final_metrics, gaze, dpi=300)
+        except Exception as e:
+            print(f"[FIG] could not render channel figures: {e}")
 
     def _render_explanation(self, explanation):
         """Draw the feature-contribution chart and write the plain-language reasons."""
         contribs = explanation.get('contributions', [])
-        mod_colors = {'eye': '#3498db', 'gaze': '#f39c12', 'voice': '#9b59b6'}
+        # Channel mapping: blink teal, gaze orange, voice purple.
+        mod_colors = MOD_COLORS
         mod_label = {'eye': 'Eye/Blink', 'gaze': 'Gaze', 'voice': 'Voice'}
 
         # --- Bar chart: each feature's contribution toward the final score ---
@@ -1775,16 +1893,16 @@ class DementiaDetectionGUI:
             shown = shown[::-1]  # largest at top in a horizontal bar chart
             labels = [c['label'] for c in shown]
             values = [c['contribution'] for c in shown]
-            colors = [mod_colors.get(c['modality'], '#7f8c8d') for c in shown]
+            colors = [mod_colors.get(c['modality'], PAL['fusion']['mid']) for c in shown]
             y_pos = range(len(shown))
             self.ax_explain.barh(list(y_pos), values, color=colors)
             self.ax_explain.set_yticks(list(y_pos))
             self.ax_explain.set_yticklabels(labels, fontsize=8)
             for i, v in zip(y_pos, values):
-                self.ax_explain.text(v + 0.3, i, f"{v:.1f}", va='center', fontsize=7, color='#333')
+                self.ax_explain.text(v + 0.3, i, f"{v:.1f}", va='center', fontsize=7, color=PAL['fusion']['dark'])
             self.ax_explain.set_xlabel('Points contributed to final score', fontsize=8)
             self.ax_explain.set_title('Feature contributions to overall score',
-                                      fontsize=10, fontweight='bold', color='#555')
+                                      fontsize=10, fontweight='bold', color=PAL['fusion']['dark'])
             self.ax_explain.grid(True, axis='x', alpha=0.3)
             # Legend for the modality colours that are actually present
             present = []
@@ -1796,7 +1914,7 @@ class DementiaDetectionGUI:
             self.fig_explain.subplots_adjust(left=0.32, bottom=0.18, top=0.88, right=0.95)
         else:
             self.ax_explain.text(0.5, 0.5, 'No feature contributed (all normal)',
-                                 ha='center', va='center', fontsize=10, color='#a0aec0',
+                                 ha='center', va='center', fontsize=10, color=PAL['fusion']['mid'],
                                  transform=self.ax_explain.transAxes)
             self.ax_explain.set_xticks([]); self.ax_explain.set_yticks([])
         self.canvas_explain.draw()
@@ -1827,112 +1945,119 @@ class DementiaDetectionGUI:
         self.explain_text.insert(tk.END, "\n".join(lines))
         self.explain_text.config(state=tk.DISABLED)
 
-    def _build_experiment_graphs_figure(self, fm, gaze):
-        """Build a second PDF page containing the graphs generated during the
-        experiment: eye openness over time, blink regularity, gaze reaction time
-        and saccade speed. Returns a matplotlib Figure (or None if no data)."""
-        ear_history = fm.get('ear_history', []) or []
-        blink_times = fm.get('blink_times', []) or []
-        rt_data = list(gaze.get('reaction_times', []) or [])
-        ss_data = list(gaze.get('saccade_speeds', []) or [])
+    def render_channel_figures(self, fm, gaze, dpi=300):
+        """Write the two split channel figures and return their paths.
 
-        if not (ear_history or len(blink_times) > 1 or rt_data or ss_data):
-            return None
+        Replaces the old single combined four-panel figure. Blink and gaze now
+        each get their own three-panel figure, drawn by crat_figures so the
+        style and palette are defined in exactly one place.
 
-        fig = Figure(figsize=(8.27, 11.69), dpi=120)  # A4 portrait
-        fig.subplots_adjust(left=0.10, right=0.94, top=0.90, bottom=0.07,
-                            hspace=0.45, wspace=0.30)
-        fig.text(0.5, 0.955, "Experiment Graphs", ha='center',
-                 fontsize=18, fontweight='bold', color='#1f4e5f')
-        fig.text(0.5, 0.935, "Signals recorded during the blink & gaze session",
-                 ha='center', fontsize=10, color='#2e8b8b')
-        fig.add_artist(plt.Line2D([0.07, 0.93], [0.925, 0.925],
-                                  color='#2e8b8b', lw=1.2, transform=fig.transFigure))
+            fig_blink.png  (a) eye openness  (b) blink regularity
+                           (c) micro-sleeps + partial blinks   [teal]
+            fig_gaze.png   (a) reaction time (b) V_peak per trial
+                           (c) target vs response              [orange]
 
-        # 1. Eye openness over time (L/R split)
-        ax1 = fig.add_subplot(2, 2, 1)
-        if ear_history:
-            left_raw = [ear_to_percent(e['left']) for e in ear_history]
-            right_raw = [ear_to_percent(e['right']) for e in ear_history]
-            window_size = max(5, len(ear_history) // 30)
-            left_values = smooth_data(left_raw, window_size)
-            right_values = smooth_data(right_raw, window_size)
-            frames = list(range(len(ear_history)))
-            ax1.plot(frames, left_values, color='#3498db', linewidth=1.0, alpha=0.8, label='Left Eye (%)')
-            ax1.plot(frames, right_values, color='#9b59b6', linewidth=1.0, alpha=0.8, label='Right Eye (%)')
-            thresh_percent = ear_to_percent(fm.get('current_threshold', 0.25))
-            ax1.axhline(y=thresh_percent, color='red', linestyle='--', linewidth=1.2, label='Blink Threshold')
-            ax1.set_ylim(0, 100)
-            ax1.set_ylabel('Eye Openness (%)', fontsize=8)
-            ax1.set_xlabel('Frame', fontsize=8)
-            ax1.grid(True, alpha=0.3)
-            ax1.legend(loc='lower right', fontsize=6)
-        else:
-            ax1.text(0.5, 0.5, 'Blink test not run', ha='center', va='center',
-                     fontsize=10, color='#a0aec0', transform=ax1.transAxes)
-        ax1.set_title('Eye Openness Over Time', fontsize=10, fontweight='bold', color='#555')
+        Returns {'blink': path_or_None, 'gaze': path_or_None}.
+        """
+        out = {'blink': None, 'gaze': None}
 
-        # 2. Blink regularity (inter-blink intervals)
-        ax2 = fig.add_subplot(2, 2, 2)
-        if len(blink_times) > 1:
-            intervals = np.diff(blink_times)
-            x_pos = np.arange(len(intervals))
-            colors = ['#2ecc71' if 2.0 <= iv <= 6.0 else '#e74c3c' for iv in intervals]
-            ax2.axhspan(2.0, 6.0, color='#2ecc71', alpha=0.10, label='Normal (2-6s)')
-            ax2.bar(x_pos, intervals, color=colors, width=0.6)
-            ax2.set_ylim(0, max(5.0, max(intervals) * 1.2))
-            ax2.set_xlabel('Blink #', fontsize=8)
-            ax2.set_ylabel('Interval (s)', fontsize=8)
-            ax2.grid(True, alpha=0.3)
-            ax2.legend(loc='upper right', fontsize=6)
-        else:
-            ax2.text(0.5, 0.5, 'Not enough blinks', ha='center', va='center',
-                     fontsize=10, color='#a0aec0', transform=ax2.transAxes)
-        ax2.set_title('Blink Regularity (Intervals)', fontsize=10, fontweight='bold', color='#555')
+        blink_events = (fm or {}).get('events') or SessionEvents()
+        ear_history = (fm or {}).get('ear_history', []) or []
+        blink_times = (fm or {}).get('blink_times', []) or []
+        if ear_history or blink_times or blink_events.n_microsleeps or blink_events.n_partial_blinks:
+            try:
+                # duration_s is deliberately left to be inferred from
+                # ear_history. Passing session_duration (a wall-clock delta)
+                # can disagree with the EAR timestamp base and collapse the
+                # panel-(a)/(c) x-axis; inferring is always self-consistent.
+                out['blink'] = blink_figure(
+                    blink_events,
+                    metrics=fm,
+                    out_path=BLINK_FIG_PATH,
+                    dpi=dpi,
+                )
+            except Exception as e:
+                print(f"[FIG] blink figure failed: {e}")
 
-        # 3. Gaze reaction time per trial
-        ax3 = fig.add_subplot(2, 2, 3)
-        if rt_data:
-            x_pos = np.arange(len(rt_data))
-            mean_rt = float(np.mean(rt_data))
-            bar_colors = ['#2ecc71' if v <= 0.5 else '#f39c12' if v <= 1.0 else '#e74c3c' for v in rt_data]
-            ax3.plot(x_pos, rt_data, color='#f39c12', marker='o', linewidth=1.8, zorder=3)
-            ax3.scatter(x_pos, rt_data, color=bar_colors, s=35, zorder=4)
-            ax3.axhspan(0, 0.5, color='#2ecc71', alpha=0.12, label='Normal (≤0.5s)')
-            ax3.axhline(mean_rt, color='#8e44ad', linestyle='--', linewidth=1.2, label=f'Mean {mean_rt:.2f}s')
-            ax3.set_ylim(0, max(2.0, max(rt_data) * 1.2))
-            ax3.set_xlabel('Trial', fontsize=8)
-            ax3.set_ylabel('Reaction time (s)', fontsize=8)
-            ax3.set_xticks(x_pos)
-            ax3.set_xticklabels([f"T{i+1}" for i in range(len(rt_data))], fontsize=6)
-            ax3.grid(True, alpha=0.3)
-            ax3.legend(loc='upper right', fontsize=6)
-        else:
-            ax3.text(0.5, 0.5, 'Gaze test not run', ha='center', va='center',
-                     fontsize=10, color='#a0aec0', transform=ax3.transAxes)
-        ax3.set_title('Gaze Reaction Time per Trial', fontsize=10, fontweight='bold', color='#555')
+        gaze_events = getattr(self, 'gaze_events', None) or SessionEvents()
+        rt_data = list((gaze or {}).get('reaction_times', []) or [])
+        if rt_data or gaze_events.n_trials:
+            try:
+                out['gaze'] = gaze_figure(
+                    gaze_events,
+                    gaze=gaze,
+                    out_path=GAZE_FIG_PATH,
+                    dpi=dpi,
+                )
+            except Exception as e:
+                print(f"[FIG] gaze figure failed: {e}")
 
-        # 4. Saccade speed per trial
-        ax4 = fig.add_subplot(2, 2, 4)
-        if ss_data:
-            x_pos = np.arange(len(ss_data))
-            mean_ss = float(np.mean(ss_data))
-            bar_colors = ['#e74c3c' if v < 100 else '#f39c12' if v < 300 else '#2ecc71' for v in ss_data]
-            ax4.bar(x_pos, ss_data, color=bar_colors, width=0.6)
-            ax4.axhline(mean_ss, color='#8e44ad', linestyle='--', linewidth=1.2, label=f'Mean {mean_ss:.0f} px/s')
-            ax4.set_ylim(0, max(100, max(ss_data) * 1.2))
-            ax4.set_xlabel('Trial', fontsize=8)
-            ax4.set_ylabel('Speed (px/s)', fontsize=8)
-            ax4.set_xticks(x_pos)
-            ax4.set_xticklabels([f"T{i+1}" for i in range(len(ss_data))], fontsize=6)
-            ax4.grid(True, alpha=0.3)
-            ax4.legend(loc='upper right', fontsize=6)
-        else:
-            ax4.text(0.5, 0.5, 'Gaze test not run', ha='center', va='center',
-                     fontsize=10, color='#a0aec0', transform=ax4.transAxes)
-        ax4.set_title('Saccade Speed per Trial', fontsize=10, fontweight='bold', color='#555')
+        return out
 
-        return fig
+    def _build_channel_figure_pages(self, fig_paths):
+        """One captioned A4 PDF page per channel figure.
+
+        Each channel's figure sits on its own page with its own caption, so the
+        blink figure lands with the blink section and the gaze figure with the
+        gaze section.
+        """
+        pages = []
+        try:
+            import matplotlib.image as mpimg
+        except Exception:
+            return pages
+
+        specs = [
+            ('blink', 'Blink Channel',
+             'Three panels — (a) eye openness over time with the adaptive blink '
+             'threshold, (b) interval between consecutive blinks against the '
+             'normal 2-6 s band, (c) micro-sleeps and partial blinks across the '
+             'recording.'),
+            ('gaze', 'Gaze Channel',
+             'Three panels — (a) reaction time per trial against the 0.5 s normal '
+             'latency, (b) peak saccade speed (V_peak), one bar per trial, '
+             '(c) target side versus participant response per trial.'),
+        ]
+
+        ink = PAL['fusion']['dark']
+        rule = PAL['fusion']['mid']
+
+        for key, title, caption in specs:
+            path = fig_paths.get(key)
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                img = mpimg.imread(path)
+            except Exception:
+                continue
+
+            pw, ph = 8.27, 11.69
+            fig = Figure(figsize=(pw, ph), dpi=120)
+            fig.text(0.5, 0.965, title, ha='center', fontsize=18,
+                     fontweight='bold', color=ink)
+            fig.text(0.5, 0.948, "Recorded during the screening session",
+                     ha='center', fontsize=9.5, color=rule)
+            fig.add_artist(plt.Line2D([0.07, 0.93], [0.940, 0.940],
+                                      color=PAL[key]['dark'], lw=1.4,
+                                      transform=fig.transFigure))
+            fig.text(0.5, 0.055, caption, ha='center', va='top', fontsize=8,
+                     color=rule, wrap=True)
+
+            ih, iw = img.shape[0], img.shape[1]
+            avail_w, avail_h = 0.88, 0.845
+            box_w = avail_w
+            box_h = (box_w * pw) * (ih / float(iw)) / ph
+            if box_h > avail_h:
+                box_h = avail_h
+                box_w = (box_h * ph) * (iw / float(ih)) / pw
+            left = (1.0 - box_w) / 2.0
+            bottom = 0.925 - box_h
+            ax = fig.add_axes([left, max(0.075, bottom), box_w, box_h])
+            ax.imshow(img)
+            ax.axis('off')
+            pages.append(fig)
+
+        return pages
 
     def _draw_reference_ranges(self, ax, fm, gaze, voice,
                                eye_avail, gaze_avail, voice_avail):
@@ -1973,7 +2098,7 @@ class DementiaDetectionGUI:
         if not rows:
             ax.axis('off')
             ax.text(0.5, 0.5, "No tests completed", ha='center', va='center',
-                    fontsize=10, color='#999')
+                    fontsize=10, color=PAL['fusion']['mid'])
             return
 
         def norm(v, lo, hi):
@@ -1982,24 +2107,24 @@ class DementiaDetectionGUI:
         rows = rows[::-1]                      # first metric at the top
         for i, (label, val, lo, hi, hlo, hhi, unit, fmt) in enumerate(rows):
             # Full range track
-            ax.barh(i, 1.0, height=0.55, color='#eef1f4', zorder=1)
+            ax.barh(i, 1.0, height=0.55, color=PAL['fusion']['light'], zorder=1)
             # Healthy band
             h0, h1 = norm(hlo, lo, hi), norm(hhi, lo, hi)
-            ax.barh(i, h1 - h0, left=h0, height=0.55, color='#2ecc71',
-                    alpha=0.28, zorder=2)
+            ax.barh(i, h1 - h0, left=h0, height=0.55, color=BAND,
+                    alpha=BAND_ALPHA, zorder=2)
 
             # Dashed threshold marker on the edge of the healthy band that the
             # value can actually cross (the open end needs no marker).
             for edge, e_val in ((h0, hlo), (h1, hhi)):
                 if 0.001 < edge < 0.999:
                     ax.plot([edge, edge], [i - 0.30, i + 0.30],
-                            color='#c0392b', ls='--', lw=1.1, zorder=4)
+                            color=PAL['fusion']['dark'], ls='--', lw=THRESH_LW, zorder=4)
                     ax.text(edge, i + 0.40, fmt.format(e_val), fontsize=5.8,
-                            color='#c0392b', ha='center', va='bottom', zorder=4)
+                            color=PAL['fusion']['dark'], ha='center', va='bottom', zorder=4)
 
             # Patient value
             inside = hlo <= val <= hhi
-            mcolor = '#2e8b8b' if inside else '#e74c3c'
+            mcolor = PAL['fusion']['dark'] if inside else BAD
             x = norm(val, lo, hi)
             ax.plot(x, i, marker='D', ms=7, color=mcolor,
                     markeredgecolor='white', markeredgewidth=1.0, zorder=5)
@@ -2017,10 +2142,10 @@ class DementiaDetectionGUI:
         for s in ['top', 'right', 'bottom', 'left']:
             ax.spines[s].set_visible(False)
         ax.legend(handles=[
-            Patch(facecolor='#2ecc71', alpha=0.28, label='Normal range'),
-            plt.Line2D([0], [0], color='#c0392b', ls='--', lw=1.1, label='Threshold'),
-            plt.Line2D([0], [0], marker='D', ls='', color='#2e8b8b', label='Within range'),
-            plt.Line2D([0], [0], marker='D', ls='', color='#e74c3c', label='Outside range'),
+            Patch(facecolor=BAND, alpha=BAND_ALPHA, label='Normal range'),
+            plt.Line2D([0], [0], color=PAL['fusion']['dark'], ls='--', lw=THRESH_LW, label='Threshold'),
+            plt.Line2D([0], [0], marker='D', ls='', color=PAL['fusion']['dark'], label='Within range'),
+            plt.Line2D([0], [0], marker='D', ls='', color=BAD, label='Outside range'),
         ], loc='upper center', bbox_to_anchor=(0.5, -0.04), ncol=4,
             fontsize=6.5, frameon=False)
 
@@ -2053,11 +2178,11 @@ class DementiaDetectionGUI:
             pw, ph = 8.27, 11.69
             fig = Figure(figsize=(pw, ph), dpi=120)
             fig.text(0.5, 0.955, title, ha='center', fontsize=18,
-                     fontweight='bold', color='#1f4e5f')
+                     fontweight='bold', color=PAL['fusion']['dark'])
             fig.text(0.5, 0.935, "Recorded during the voice screening session",
-                     ha='center', fontsize=10, color='#2e8b8b')
+                     ha='center', fontsize=10, color=PAL['fusion']['mid'])
             fig.add_artist(plt.Line2D([0.07, 0.93], [0.925, 0.925],
-                                      color='#2e8b8b', lw=1.2, transform=fig.transFigure))
+                                      color=PAL['voice']['dark'], lw=1.4, transform=fig.transFigure))
 
             # Size the axes to the image's own aspect ratio so a wide dashboard
             # fills the page width instead of floating in a sea of white space.
@@ -2112,30 +2237,33 @@ class DementiaDetectionGUI:
 
             # Header band
             fig.text(0.5, 0.955, "Cognitive Screening Report", ha='center',
-                     fontsize=20, fontweight='bold', color='#1f4e5f')
+                     fontsize=20, fontweight='bold', color=PAL['fusion']['dark'])
             fig.text(0.5, 0.935, "Cognitive Risk Assessment  |  Blink + Gaze + Voice",
-                     ha='center', fontsize=10, color='#2e8b8b')
+                     ha='center', fontsize=10, color=PAL['fusion']['mid'])
             fig.text(0.5, 0.918, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                     ha='center', fontsize=8, color='#777')
+                     ha='center', fontsize=8, color=PAL['fusion']['mid'])
             fig.add_artist(plt.Line2D([0.07, 0.93], [0.908, 0.908],
-                                      color='#2e8b8b', lw=1.5, transform=fig.transFigure))
+                                      color=PAL['fusion']['dark'], lw=1.5, transform=fig.transFigure))
 
             # Patient block
             pinfo = (f"Patient: {pdata.get('name','N/A')}      Token: {pdata.get('token','N/A')}      "
                      f"Age: {pdata.get('age','N/A')}\n"
                      f"Phone: {pdata.get('phone','N/A')}      Place: {pdata.get('place','N/A')}")
-            fig.text(0.07, 0.885, pinfo, fontsize=9, va='top', color='#333')
+            fig.text(0.07, 0.885, pinfo, fontsize=9, va='top', color=PAL['fusion']['dark'])
 
             # Overall score banner
             ov_score = overall.get('score', 0.0)
             ov_level = overall.get('level', 'N/A')
-            band_color = {'LOW': '#2ecc71', 'MILD': '#f1c40f', 'MODERATE': '#e67e22',
-                          'HIGH': '#e74c3c', 'VERY HIGH': '#c0392b'}.get(ov_level, '#7f8c8d')
+            # Reserved meanings only: a normal band reads as an in-range value
+            # (fusion dark), an elevated band reads as flagged (BAD).
+            band_color = {'LOW': PAL['fusion']['dark'], 'MILD': PAL['fusion']['dark'],
+                          'MODERATE': BAD, 'HIGH': BAD,
+                          'VERY HIGH': BAD}.get(ov_level, PAL['fusion']['mid'])
             ax_band = fig.add_axes([0.07, 0.80, 0.86, 0.055])
             ax_band.axis('off')
             ax_band.add_patch(plt.Rectangle((0, 0), 1, 1, color=band_color, alpha=0.18))
             ax_band.text(0.02, 0.5, "OVERALL RISK SCORE", va='center', fontsize=11,
-                         fontweight='bold', color='#333')
+                         fontweight='bold', color=PAL['fusion']['dark'])
             ax_band.text(0.98, 0.5, f"{ov_score:.0f}%   {ov_level}", va='center', ha='right',
                          fontsize=18, fontweight='bold', color=band_color)
 
@@ -2158,21 +2286,21 @@ class DementiaDetectionGUI:
                                colWidths=[0.18, 0.20, 0.62])
             tbl.auto_set_font_size(False); tbl.set_fontsize(8.5); tbl.scale(1, 1.6)
             for (r, c), cell in tbl.get_celld().items():
-                cell.set_edgecolor('#dddddd')
+                cell.set_edgecolor(PAL['fusion']['light'])
                 if r == 0:
-                    cell.set_facecolor('#2e8b8b'); cell.set_text_props(color='white', fontweight='bold')
+                    cell.set_facecolor(PAL['fusion']['dark']); cell.set_text_props(color='white', fontweight='bold')
 
             # ---- Top drivers: bar chart (replaces the old numeric list) ------
             fig.text(0.07, 0.605, "Top drivers — what pushed the score up",
-                     fontsize=11, fontweight='bold', color='#1f4e5f')
+                     fontsize=11, fontweight='bold', color=PAL['fusion']['dark'])
             ax_x = fig.add_axes([0.30, 0.40, 0.60, 0.19])
             contribs = [c for c in explanation.get('contributions', []) if c['contribution'] > 0][:8]
-            mod_colors = {'eye': '#3498db', 'gaze': '#f39c12', 'voice': '#9b59b6'}
+            mod_colors = MOD_COLORS   # blink teal, gaze orange, voice purple
             if contribs:
                 bars = contribs[::-1]          # largest driver at the top
                 vals = [c['contribution'] for c in bars]
                 ax_x.barh(range(len(bars)), vals,
-                          color=[mod_colors.get(c['modality'], '#888') for c in bars])
+                          color=[mod_colors.get(c['modality'], PAL['fusion']['mid']) for c in bars])
                 ax_x.set_yticks(range(len(bars)))
                 ax_x.set_yticklabels([c['label'] for c in bars], fontsize=7.5)
                 ax_x.set_xlabel('Points contributed to final score', fontsize=8)
@@ -2180,10 +2308,10 @@ class DementiaDetectionGUI:
 
                 # "Major driver" threshold: anything at/above 10 points is called
                 # out, so the reader can see which bars actually matter.
-                ax_x.axvline(MAJOR_DRIVER_PTS, color='#c0392b', ls='--', lw=1.1, zorder=3)
+                ax_x.axvline(MAJOR_DRIVER_PTS, color=BAD, ls='--', lw=THRESH_LW, zorder=3)
                 ax_x.text(MAJOR_DRIVER_PTS, len(bars) - 0.35,
                           f' major driver ≥ {MAJOR_DRIVER_PTS:g} pts',
-                          fontsize=6.5, color='#c0392b', va='center')
+                          fontsize=6.5, color=BAD, va='center')
                 for i, v in enumerate(vals):
                     ax_x.text(v + max(vals) * 0.015, i, f"{v:.1f}", va='center', fontsize=6.5)
                 ax_x.grid(True, axis='x', alpha=0.3)
@@ -2201,37 +2329,38 @@ class DementiaDetectionGUI:
             else:
                 ax_x.axis('off')
                 ax_x.text(0.5, 0.5, "All measured features within normal ranges",
-                          ha='center', va='center', fontsize=10, color='#999')
+                          ha='center', va='center', fontsize=10, color=PAL['fusion']['mid'])
 
             # ---- Measured value vs clinical threshold, per modality ----------
             fig.text(0.07, 0.355,
                      "Measured values vs normal range — eye, gaze and voice",
-                     fontsize=11, fontweight='bold', color='#1f4e5f')
+                     fontsize=11, fontweight='bold', color=PAL['fusion']['dark'])
             ax_ref = fig.add_axes([0.30, 0.155, 0.60, 0.185])
             self._draw_reference_ranges(ax_ref, fm, gaze, voice,
                                         eye_avail, gaze_avail, voice_avail)
 
             # One plain-language sentence; every number now lives in the charts.
             fig.text(0.07, 0.128, explanation.get('summary', ''),
-                     fontsize=8.5, va='top', color='#333', wrap=True)
+                     fontsize=8.5, va='top', color=PAL['fusion']['dark'], wrap=True)
 
             # Footer / disclaimer
             fig.add_artist(plt.Line2D([0.07, 0.93], [0.08, 0.08],
-                                      color='#cccccc', lw=1, transform=fig.transFigure))
+                                      color=PAL['fusion']['light'], lw=1, transform=fig.transFigure))
             disclaimer = ("DISCLAIMER: This is an automated screening aid, NOT a medical diagnosis. "
                           "Scores reflect the presence of behavioural indicators, not a confirmed "
                           "condition. A higher score warrants follow-up with a qualified clinician. "
                           "Voice attribution is an approximate Random-Forest importance estimate.")
             fig.text(0.5, 0.055, disclaimer, ha='center', va='top', fontsize=7,
-                     color='#888', wrap=True)
+                     color=PAL['fusion']['mid'], wrap=True)
 
             with PdfPages(out_path) as pdf:
                 pdf.savefig(fig)
-                # Page 2: the graphs generated during the blink & gaze experiment
-                fig2 = self._build_experiment_graphs_figure(fm, gaze)
-                if fig2 is not None:
-                    pdf.savefig(fig2)
-                # Pages 3+: the voice analysis graphs
+                # Pages 2-3: one captioned page per channel — the blink figure
+                # with the blink section, the gaze figure with the gaze section.
+                fig_paths = self.render_channel_figures(fm, gaze, dpi=300)
+                for cfig in self._build_channel_figure_pages(fig_paths):
+                    pdf.savefig(cfig)
+                # Pages 4+: the voice analysis graphs
                 if voice_avail:
                     for vfig in self._build_voice_graph_figures(voice):
                         pdf.savefig(vfig)
@@ -2419,23 +2548,23 @@ class DementiaDetectionGUI:
         
         # Reset live graphs 
         self.ax1.clear()
-        self.ax1.set_title('Eye Openness Over Time', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': '#555'})
+        self.ax1.set_title('Eye Openness Over Time', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': PAL['fusion']['dark']})
         self.ax1.set_ylim(0, 0.5)
-        self.ax1.grid(True, alpha=0.3, color='#ccd')
+        self.ax1.grid(True, alpha=0.3, color=PAL['fusion']['light'])
         self.ax1.spines['top'].set_visible(False)
         self.ax1.spines['right'].set_visible(False)
-        self.ax1.spines['left'].set_color('#ccd')
-        self.ax1.spines['bottom'].set_color('#ccd')
+        self.ax1.spines['left'].set_color(PAL['fusion']['light'])
+        self.ax1.spines['bottom'].set_color(PAL['fusion']['light'])
         self.canvas1.draw()
         
         self.ax2.clear()
-        self.ax2.set_title('Blink Pattern', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': '#555'})
+        self.ax2.set_title('Blink Pattern', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': PAL['fusion']['dark']})
         self.ax2.set_ylim(0, 1.0)
-        self.ax2.grid(True, alpha=0.3, color='#ccd')
+        self.ax2.grid(True, alpha=0.3, color=PAL['fusion']['light'])
         self.ax2.spines['top'].set_visible(False)
         self.ax2.spines['right'].set_visible(False)
-        self.ax2.spines['left'].set_color('#ccd')
-        self.ax2.spines['bottom'].set_color('#ccd')
+        self.ax2.spines['left'].set_color(PAL['fusion']['light'])
+        self.ax2.spines['bottom'].set_color(PAL['fusion']['light'])
         self.canvas2.draw()
         
         # Explicitly hide page 3 and show page 2
@@ -2492,23 +2621,23 @@ class DementiaDetectionGUI:
         
         # Reset live graphs 
         self.ax1.clear()
-        self.ax1.set_title('Eye Openness Over Time', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': '#555'})
+        self.ax1.set_title('Eye Openness Over Time', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': PAL['fusion']['dark']})
         self.ax1.set_ylim(0, 0.5)
-        self.ax1.grid(True, alpha=0.3, color='#ccd')
+        self.ax1.grid(True, alpha=0.3, color=PAL['fusion']['light'])
         self.ax1.spines['top'].set_visible(False)
         self.ax1.spines['right'].set_visible(False)
-        self.ax1.spines['left'].set_color('#ccd')
-        self.ax1.spines['bottom'].set_color('#ccd')
+        self.ax1.spines['left'].set_color(PAL['fusion']['light'])
+        self.ax1.spines['bottom'].set_color(PAL['fusion']['light'])
         self.canvas1.draw()
         
         self.ax2.clear()
-        self.ax2.set_title('Blink Pattern', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': '#555'})
+        self.ax2.set_title('Blink Pattern', fontdict={'fontsize': 10, 'fontweight': 'bold', 'color': PAL['fusion']['dark']})
         self.ax2.set_ylim(0, 1.0)
-        self.ax2.grid(True, alpha=0.3, color='#ccd')
+        self.ax2.grid(True, alpha=0.3, color=PAL['fusion']['light'])
         self.ax2.spines['top'].set_visible(False)
         self.ax2.spines['right'].set_visible(False)
-        self.ax2.spines['left'].set_color('#ccd')
-        self.ax2.spines['bottom'].set_color('#ccd')
+        self.ax2.spines['left'].set_color(PAL['fusion']['light'])
+        self.ax2.spines['bottom'].set_color(PAL['fusion']['light'])
         self.canvas2.draw()
 
         # Explicitly hide page 3 and show page 1

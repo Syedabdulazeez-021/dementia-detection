@@ -8,6 +8,8 @@ from collections import deque
 import time
 from datetime import datetime
 
+from crat_events import SessionEvents
+
 class DementiaAnalyzer:
     """Analyzes eye patterns for dementia indicators."""
     
@@ -46,6 +48,12 @@ class DementiaAnalyzer:
         self.session_start = time.time()
         self.ear_history = deque(maxlen=1000)
         self.predictions_history = deque(maxlen=1000)
+
+        # Per-session event collector (in-memory only, never written to disk).
+        # It sits BESIDE the counters above — the counters remain the sole
+        # source of truth for every score; these events only record *when*
+        # things happened so the figures can plot them.
+        self.events = SessionEvents()
         
         # Normal ranges (from research)
         self.NORMAL_BLINK_RATE_MIN = 12  # blinks per minute
@@ -144,6 +152,10 @@ class DementiaAnalyzer:
                         'end': timestamp,
                         'duration': duration
                     })
+                    # Additive: same event, recording-relative, for panel (c).
+                    # The comparison above and the list above are unchanged.
+                    self.events.log_microsleep(
+                        self.current_blink_start - self.session_start, duration)
                 self.current_blink_start = None
             
         # Detect partial blink
@@ -170,6 +182,9 @@ class DementiaAnalyzer:
                             'timestamp': timestamp - 0.2, # approximate center of dip
                             'min_ear': self.current_dip_min_ear
                         })
+                        # Additive: same event, recording-relative, for panel (c).
+                        self.events.log_partial_blink(
+                            (timestamp - 0.2) - self.session_start)
         
         self.previous_state = current_state
         
@@ -427,9 +442,13 @@ class DementiaAnalyzer:
             'total_frames': len(self.ear_history),
             'avg_ear': np.mean([e['ear'] for e in self.ear_history]) if self.ear_history else 0.0,
             'partial_blinks': self.partial_blinks,
-            'micro_sleeps': self.micro_sleeps
+            'micro_sleeps': self.micro_sleeps,
+            # The collector itself, so the figures can plot event times. Counts
+            # here always agree with len(partial_blinks) / len(micro_sleeps).
+            'events': self.events,
+            'events_summary': self.events.summary()
         }
-        
+
         return stats
     
     def reset(self):
@@ -444,9 +463,12 @@ class DementiaAnalyzer:
         
         self.micro_sleeps.clear()
         self.current_blink_start = None
-        
+
         self.in_dip = False
         self.partial_blinks.clear()
+
+        # Clear the per-session events alongside the counters they mirror.
+        self.events.reset()
         
         # Reset calibration
         self.is_calibrated = False

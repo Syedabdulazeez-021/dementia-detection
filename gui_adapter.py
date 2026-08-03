@@ -151,7 +151,11 @@ class GUIDementiaAnalyzer:
             'micro_sleeps': self.analyzer.micro_sleeps,
             'current_threshold': self.analyzer.ear_threshold,
             'frame_count': self.frame_count,
-            'score_breakdown': risk_data.get('score_breakdown', {})
+            'score_breakdown': risk_data.get('score_breakdown', {}),
+            # Per-session event collector (in-memory). Counts mirror the
+            # partial_blinks / micro_sleeps lists above exactly.
+            'events': self.analyzer.events,
+            'events_summary': stats.get('events_summary', {})
         }
         
     def export_data(self):

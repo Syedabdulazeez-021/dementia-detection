@@ -1,12 +1,14 @@
 # ---- Python ----
 __pycache__/
 *.py[cod]
+*.pyc
 *.egg-info/
 .pytest_cache/
 
 # ---- Virtual environments (never commit these) ----
 venv/
 .venv/
+.venv312/
 env/
 bio_env/
 
@@ -24,6 +26,11 @@ report_*.pdf
 waveform_plot.png
 feature_plot.png
 voice_dashboard.png
+voice_*.png
+fig_blink.png
+fig_gaze.png
+gaze_attribution.json
+*.wav
 
 # ---- OS / editor / tooling cruft ----
 .vscode/
