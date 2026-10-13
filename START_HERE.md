@@ -1,14 +1,14 @@
 # 🧠 Dementia Detection System - Quick Start Guide
 
 ## 📁 Location
-All files are in: `C:\Users\LEGION\Downloads\archive`
+All files are in the repository root (the folder you cloned, `dementia-detection/`).
 
 ## 🚀 How to Run
 
 ### **Option 1: Automated Setup (Recommended)**
 
 ```bash
-cd C:\Users\LEGION\Downloads\archive
+cd dementia-detection
 python quick_start.py
 ```
 

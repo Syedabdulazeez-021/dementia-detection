@@ -73,6 +73,18 @@ GAZE_FIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fig_ga
 # incorrect with no response, instead of blocking the loop indefinitely.
 GAZE_TRIAL_TIMEOUT_S = 3.0
 
+# Physiological floor on gaze reaction time. A visually guided saccade cannot
+# start sooner than this after the stimulus, so a centre-to-lateral change
+# detected earlier is anticipatory, not a response, and is ignored.
+GAZE_MIN_RESPONSE_S = 0.08
+
+# Minimum |g_R - g_L| (in fractions of eye width) for a usable calibration.
+# Centre-fixation jitter of the per-eye ratio is ~0.02-0.05, so a smaller
+# spread cannot separate LEFT/CENTER/RIGHT.
+GAZE_CALIB_MIN_SPREAD = 0.04
+# How long the "calibration failed" notice stays up before calibration reruns.
+GAZE_CALIB_FAIL_NOTICE_S = 3.0
+
 
 class DementiaDetectionGUI:
     """Main GUI Application for Dementia Detection System"""
@@ -1102,20 +1114,104 @@ class DementiaDetectionGUI:
         self.show_page(self.page3_frame)
         
     def get_ratio(self, mesh_points):
-        """Calculate eye ratio from face mesh landmarks"""
-        LEFT_IRIS = [474, 475, 476, 477]
-        RIGHT_IRIS = [469, 470, 471, 472]
-        
+        """Calculate eye ratio from face mesh landmarks.
+
+        Each iris is located as a fraction of ITS OWN eye's width (corner to
+        corner), and the two per-eye fractions are averaged. Previously iris
+        474-477 was measured against the 33/133 corners and iris 469-472
+        against 362/263, i.e. each iris against the other eye, which made the
+        value track head yaw rather than gaze.
+        """
+        # MediaPipe topology: iris 469-472 sits in the eye bounded by 33/133,
+        # iris 474-477 in the eye bounded by 362/263. Both fractions increase
+        # toward larger image x, so they share a sign and can be averaged.
+        RIGHT_IRIS = [469, 470, 471, 472]   # eye with corners 33 / 133
+        LEFT_IRIS = [474, 475, 476, 477]    # eye with corners 362 / 263
+
         left_iris = mesh_points[LEFT_IRIS]
         right_iris = mesh_points[RIGHT_IRIS]
-        
+
         left_center = np.mean(left_iris, axis=0)
         right_center = np.mean(right_iris, axis=0)
-        
-        left_ratio = (left_center[0] - mesh_points[33][0]) / (mesh_points[133][0] - mesh_points[33][0] + 1e-6)
-        right_ratio = (right_center[0] - mesh_points[362][0]) / (mesh_points[263][0] - mesh_points[362][0] + 1e-6)
-        
+
+        right_ratio = (right_center[0] - mesh_points[33][0]) / (mesh_points[133][0] - mesh_points[33][0] + 1e-6)
+        left_ratio = (left_center[0] - mesh_points[362][0]) / (mesh_points[263][0] - mesh_points[362][0] + 1e-6)
+
         return (left_ratio + right_ratio) / 2
+
+    def _finalise_gaze_calibration(self):
+        """Turn the calibration samples into g_L, g_C, g_R and validate them.
+
+        The sign of the pixel axis is read from the data (g_R vs g_L) rather
+        than assumed, and every ratio is mapped onto an axis where LEFT is
+        always smaller, so Eq. 8 applies unchanged on a mirrored or unmirrored
+        feed. Returns None if usable, else a short reason the calibration
+        failed.
+        """
+        data = self.gaze_calibration_data
+        if not all(len(data[k]) > 0 for k in ("LEFT", "CENTER", "RIGHT")):
+            return "no face detected in a stage"
+        g_l = float(np.mean(data["LEFT"]))
+        g_c = float(np.mean(data["CENTER"]))
+        g_r = float(np.mean(data["RIGHT"]))
+        print(f"[GAZE] calibration raw: g_L={g_l:.4f} g_C={g_c:.4f} g_R={g_r:.4f}")
+
+        self.gaze_axis_sign = 1.0 if g_r >= g_l else -1.0
+        if self.gaze_axis_sign < 0:
+            # The frame is mirrored at capture, so a correctly performed
+            # calibration always reads RIGHT larger. Reversed means the
+            # operator looked the wrong way: reject it, never invert it.
+            return "LEFT/RIGHT reversed"
+        g_l, g_c, g_r = (self.gaze_axis_sign * g for g in (g_l, g_c, g_r))
+        if not (g_l < g_c < g_r):
+            return "LEFT/CENTER/RIGHT not in order"
+        if (g_r - g_l) < GAZE_CALIB_MIN_SPREAD:
+            return f"left-right spread {g_r - g_l:.3f} too small"
+
+        self.left_thresh, self.center_thresh, self.right_thresh = g_l, g_c, g_r
+        return None
+
+    def _restart_gaze_calibration(self):
+        """Discard the calibration samples and run all three stages again."""
+        self.gaze_calibration_stage = 0
+        self.gaze_calibration_data = {"LEFT": [], "CENTER": [], "RIGHT": []}
+        self.gaze_stage_time = time.time()
+        self.gaze_calib_fail_reason = None
+
+    def _classify_gaze(self, ratio):
+        """Eq. 8 on the sign-normalised axis: LEFT / CENTER / RIGHT."""
+        u = self.gaze_axis_sign * ratio
+        if u < (self.left_thresh + self.center_thresh) / 2:
+            return "LEFT"
+        if u > (self.right_thresh + self.center_thresh) / 2:
+            return "RIGHT"
+        return "CENTER"
+
+    def _gaze_response_step(self, gaze_dir, elapsed):
+        """Advance the per-trial response detector by one classified frame.
+
+        A response is a TRANSITION from CENTER to a lateral state after the
+        stimulus appears. A gaze already lateral at onset does not count until
+        it has returned to centre and moved out again. A transition sooner than
+        GAZE_MIN_RESPONSE_S is anticipatory: it is ignored and the gaze must
+        return to centre again before a response can register.
+
+        Args:
+            gaze_dir: "LEFT" / "CENTER" / "RIGHT" for this frame
+            elapsed:  seconds since stimulus onset
+        Returns:
+            "LEFT" / "RIGHT" if this frame is the response, else None
+        """
+        if gaze_dir == "CENTER":
+            self._trial_seen_center = True
+            return None
+        if not self._trial_seen_center:
+            return None
+        # Centre -> lateral transition.
+        self._trial_seen_center = False
+        if elapsed < GAZE_MIN_RESPONSE_S:
+            return None
+        return gaze_dir
         
     def start_gaze_experiment(self):
         """Start gaze experiment"""
@@ -1152,7 +1248,11 @@ class DementiaDetectionGUI:
         self.gaze_calibration_stage = 0 # 0=LEFT, 1=CENTER, 2=RIGHT
         self.gaze_calibration_data = {"LEFT": [], "CENTER": [], "RIGHT": []}
         self.gaze_stage_time = time.time()
-        
+        self.gaze_axis_sign = 1.0
+        self.gaze_calib_fail_reason = None
+        self.gaze_calib_fail_time = 0.0
+        self._trial_seen_center = False
+
         self.gaze_experiment_state = "CALIBRATION"
         
         self.trial_count = 0
@@ -1270,7 +1370,16 @@ class DementiaDetectionGUI:
                     
                     if self.gaze_experiment_state == "CALIBRATION":
                         stage_names = ["LEFT", "CENTER", "RIGHT"]
-                        if self.gaze_calibration_stage < 3:
+                        if self.gaze_calib_fail_reason is not None:
+                            # A failed calibration is shown, then redone; the
+                            # trials never start on an unusable mapping.
+                            cv2.putText(frame, "CALIBRATION FAILED - REDOING", (w//2 - 230, 80),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+                            cv2.putText(frame, self.gaze_calib_fail_reason, (w//2 - 230, 120),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            if time.time() - self.gaze_calib_fail_time > GAZE_CALIB_FAIL_NOTICE_S:
+                                self._restart_gaze_calibration()
+                        elif self.gaze_calibration_stage < 3:
                             direction = stage_names[self.gaze_calibration_stage]
                             cv2.putText(frame, f"LOOK {direction}", (w//2 - 100, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
                             
@@ -1282,13 +1391,15 @@ class DementiaDetectionGUI:
                                 self.gaze_calibration_stage += 1
                                 self.gaze_stage_time = time.time()
                         else:
-                            # Calibration Complete
-                            self.left_thresh = np.mean(self.gaze_calibration_data["LEFT"])
-                            self.center_thresh = np.mean(self.gaze_calibration_data["CENTER"])
-                            self.right_thresh = np.mean(self.gaze_calibration_data["RIGHT"])
-                            
-                            self.gaze_experiment_state = "FIXATION"
-                            self.fixation_time = time.time()
+                            # Calibration Complete — proceed only if usable.
+                            reason = self._finalise_gaze_calibration()
+                            if reason is not None:
+                                print(f"[GAZE] calibration failed: {reason}; redoing")
+                                self.gaze_calib_fail_reason = reason
+                                self.gaze_calib_fail_time = time.time()
+                            else:
+                                self.gaze_experiment_state = "FIXATION"
+                                self.fixation_time = time.time()
                             
                     elif self.gaze_experiment_state == "FIXATION":
                         cv2.putText(frame, "+", (w//2, h//2), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 4)
@@ -1307,6 +1418,8 @@ class DementiaDetectionGUI:
                             # skips the first frame after this reset instead.
                             self.prev_eye_x = None
                             self.prev_time = None
+                            # Response must be a fresh centre->lateral change.
+                            self._trial_seen_center = False
                             self.gaze_experiment_state = "STIMULUS"
                             
                     elif self.gaze_experiment_state == "STIMULUS":
@@ -1323,11 +1436,7 @@ class DementiaDetectionGUI:
 
                         if mesh_points is not None:
                             ratio = self.get_ratio(mesh_points)
-                            gaze_dir = "CENTER"
-                            if ratio < (self.left_thresh + self.center_thresh) / 2:
-                                gaze_dir = "LEFT"
-                            elif ratio > (self.right_thresh + self.center_thresh) / 2:
-                                gaze_dir = "RIGHT"
+                            gaze_dir = self._classify_gaze(ratio)
 
                             eye_x = np.mean([mesh_points[474][0], mesh_points[469][0]])
                             current_time = time.time()
@@ -1346,11 +1455,13 @@ class DementiaDetectionGUI:
 
                             self.current_gaze_dir = gaze_dir
 
-                            # "CENTER" is the unclassified default — it is not a
-                            # response and must not complete the trial.
-                            if gaze_dir in ("LEFT", "RIGHT"):
-                                response = gaze_dir
-                                reaction = time.time() - self.stimulus_time
+                            # Only a centre->lateral transition at or after the
+                            # physiological floor completes the trial.
+                            elapsed = current_time - self.stimulus_time
+                            moved = self._gaze_response_step(gaze_dir, elapsed)
+                            if moved is not None:
+                                response = moved
+                                reaction = elapsed
                                 responded = True
 
                         # Timeout is checked even when no face was detected, so

@@ -94,8 +94,11 @@ def blink_baseline():
 
         a.detect_blink(ear, ear, timestamp=T0 + t_rel)
 
-    # calculate_blink_rate() and get_session_stats() call time.time(); pin the
-    # elapsed window to exactly 60 s so the rate is reproducible.
+    # The blink rate no longer reads the clock: it is taken over the recorded
+    # post-calibration window (calibration end at t=5.0 to the last sample at
+    # t=59.95, i.e. 54.95 s), so 10 blinks give 10 x 60 / 54.95 = 10.92 bpm.
+    # get_session_stats() still reads time.time() (for session_duration), so the
+    # clock stays pinned to T0 + 60 s and nothing here depends on when it runs.
     import dementia_analyzer as _mod
     real_time_mod = _mod.time
 

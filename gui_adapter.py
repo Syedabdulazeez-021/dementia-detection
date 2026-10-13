@@ -33,6 +33,10 @@ class GUIDementiaAnalyzer:
         
     def stop_session(self):
         """Stop the current session"""
+        if self.session_active:
+            # Frames stop reaching the analyzer here, so its measurement
+            # window freezes; log it once and warn if it is off nominal.
+            self.analyzer.check_measurement_window()
         self.session_active = False
         
     def reset(self):
@@ -142,6 +146,7 @@ class GUIDementiaAnalyzer:
             'total_blinks': stats['total_blinks'],
             'avg_ear': stats['avg_ear'],
             'session_duration': stats['session_duration'],
+            'measurement_window_s': stats['measurement_window_s'],
             'risk_score': risk_score,
             'risk_level': risk_level,
             'risk_factors': risk_factors,

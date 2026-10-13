@@ -6,7 +6,7 @@
 
 1. **Install Dependencies** (if not already installed):
 ```bash
-cd C:\Users\LEGION\Downloads\archive
+cd dementia-detection
 pip install -r requirements.txt
 ```
 

@@ -141,7 +141,6 @@ produces a shorter report. A row is also appended to a local CSV record.
 | `scoring.py` | The gaze score, the weighted combination, the risk bands, and the contribution breakdown. |
 | `crat_figures.py` | Shared colours and typography, plus the blink and gaze result figures. |
 | `crat_events.py` | Records when each event happened during a session. Held in memory only and never written to disk. |
-| `gaze_stimulus_experiment.py` | A standalone version of the gaze task. Not used by the desktop app. |
 | `app.py` | A separate web version built on Flask. It measures eye openness a different way, so its scores are not comparable. |
 | `ml/` | Scripts and CSV templates for training optional blink, gaze, and fusion models from labelled data. |
 | `retrain.py` | Retrains the voice model once confirmed diagnoses have been filled in. |

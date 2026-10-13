@@ -325,14 +325,33 @@ def gaze_figure(events, gaze=None, out_path="fig_gaze.png", dpi=300,
     # -- (a) reaction time per trial --------------------------------------
     ax1 = fig.add_subplot(3, 1, 1)
     if rt:
-        x = np.arange(1, len(rt) + 1)
+        # Place each RT at its TRIAL index, not its position in the RT list.
+        # An RT is recorded exactly when a trial has a response, so the k-th RT
+        # belongs to the k-th answered trial; a timed-out trial leaves a gap.
+        answered_idx = [i for i, t in enumerate(trials, start=1)
+                        if t.get("response") is not None]
+        if len(answered_idx) == len(rt):
+            x = np.array(answered_idx)
+            ticks = np.arange(1, n + 1)
+            gaps = [i for i, t in enumerate(trials, start=1)
+                    if t.get("response") is None]
+        else:  # no per-trial events to align with: fall back to list order
+            x = np.arange(1, len(rt) + 1)
+            ticks, gaps = x, []
         _band(ax1, 0, GAZE_RT_HEALTHY_S)
-        ax1.plot(x, rt, "-", color=C["mid"], lw=1.5, zorder=2)
+        # The connecting line breaks at timed-out trials instead of bridging them.
+        line_y = np.full(int(ticks[-1]), np.nan)
+        line_y[x - 1] = rt
+        ax1.plot(np.arange(1, len(line_y) + 1), line_y, "-", color=C["mid"],
+                 lw=1.5, zorder=2)
         colors = [C["dark"] if v <= GAZE_RT_HEALTHY_S else BAD for v in rt]
         ax1.scatter(x, rt, c=colors, s=34, zorder=5)
         _threshold(ax1, GAZE_RT_HEALTHY_S, "gaze")
-        ax1.set_xticks(x)
-        ax1.set_xticklabels([f"T{i}" for i in x])
+        for i in gaps:
+            ax1.text(i, 0.04, "timeout", ha="center", va="bottom", fontsize=7,
+                     color=BAD, rotation=90)
+        ax1.set_xticks(ticks)
+        ax1.set_xticklabels([f"T{i}" for i in ticks])
         ax1.set_ylim(0, max(1.0, max(rt) * 1.25))
         n_slow = sum(1 for v in rt if v > GAZE_RT_HEALTHY_S)
         ax1.legend(handles=[

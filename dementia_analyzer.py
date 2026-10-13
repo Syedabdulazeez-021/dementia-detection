@@ -10,6 +10,14 @@ from datetime import datetime
 
 from crat_events import SessionEvents
 
+# Nominal blink measurement window: a 60 s recording minus the 5 s per-user
+# EAR calibration that opens it (methods: blinking is recorded for the
+# remainder of the minute after calibration).
+NOMINAL_BLINK_WINDOW_S = 55.0
+# A recorded window further than this fraction from nominal is logged as a
+# warning, so a wrong duration cannot silently reach the score again.
+BLINK_WINDOW_TOLERANCE = 0.20
+
 class DementiaAnalyzer:
     """Analyzes eye patterns for dementia indicators."""
     
@@ -46,7 +54,15 @@ class DementiaAnalyzer:
         # Metrics tracking
         self.blink_count = 0
         self.session_start = time.time()
-        self.ear_history = deque(maxlen=1000)
+        # 4000 holds a full 60 s recording at any plausible frame rate, so the
+        # blink figure is not clipped. Δt does NOT come from this container.
+        self.ear_history = deque(maxlen=4000)
+
+        # Blink measurement window, as plain scalars independent of any history
+        # container. Opens when EAR calibration completes; closes at the most
+        # recent EAR sample. Δt in Eq. 5 is window_end - window_start.
+        self.window_start = None
+        self.window_end = None
         self.predictions_history = deque(maxlen=1000)
 
         # Per-session event collector (in-memory only, never written to disk).
@@ -117,7 +133,13 @@ class DementiaAnalyzer:
                     print(f"Blink detection is now active!\n")
                 
                 self.is_calibrated = True
+                # The measurement window opens here. No blink can be counted
+                # before this point: the calibration branch above returns
+                # before any detection runs.
+                self.window_start = timestamp
         
+        self.window_end = timestamp
+
         # Store EAR history
         self.ear_history.append({
             'timestamp': timestamp,
@@ -223,22 +245,52 @@ class DementiaAnalyzer:
             'message': f'Calibrating... Keep eyes open! ({remaining:.1f}s remaining)'
         }
     
+    def measurement_window(self):
+        """
+        Length of the blink measurement window in seconds (Δt in Eq. 5).
+
+        From calibration completion to the most recent EAR sample. It stops
+        growing when frames stop arriving, so it does not depend on how long
+        is spent on later pages. None if the window never opened.
+        """
+        if self.window_start is None or self.window_end is None:
+            return None
+        return self.window_end - self.window_start
+
     def calculate_blink_rate(self):
         """
-        Calculate blinks per minute.
+        Calculate blinks per minute over the measurement window.
         
         Returns:
             Blink rate (float)
         """
-        elapsed_time = time.time() - self.session_start
+        elapsed_time = self.measurement_window()
         
-        if elapsed_time < 1:
+        if elapsed_time is None or elapsed_time < 1:
             return 0.0
         
         # Blinks per minute
         blink_rate = (self.blink_count / elapsed_time) * 60
         
         return blink_rate
+
+    def check_measurement_window(self, nominal=NOMINAL_BLINK_WINDOW_S):
+        """
+        Log the window, count and rate, and warn if the window is off nominal.
+
+        Called once when a recording stops.
+        """
+        dt = self.measurement_window()
+        if dt is None:
+            print("[BLINK][WARNING] measurement window never opened "
+                  "(EAR calibration did not complete); blink rate is 0.")
+            return
+        print(f"[BLINK] window={dt:.2f} s, blinks={self.blink_count}, "
+              f"rate={self.calculate_blink_rate():.2f} bpm")
+        if abs(dt - nominal) > BLINK_WINDOW_TOLERANCE * nominal:
+            print(f"[BLINK][WARNING] measurement window {dt:.2f} s differs from "
+                  f"nominal {nominal:.0f} s by more than "
+                  f"{BLINK_WINDOW_TOLERANCE:.0%}.")
     
     def calculate_blink_variance(self):
         """
@@ -436,6 +488,8 @@ class DementiaAnalyzer:
         
         stats = {
             'session_duration': elapsed_time,
+            # Δt actually used for the blink rate (None if never opened).
+            'measurement_window_s': self.measurement_window(),
             'total_blinks': self.blink_count,
             'blink_rate': self.calculate_blink_rate(),
             'blink_variance': self.calculate_blink_variance(),
@@ -460,6 +514,8 @@ class DementiaAnalyzer:
         self.blink_count = 0
         self.previous_state = None
         self.session_start = time.time()
+        self.window_start = None
+        self.window_end = None
         
         self.micro_sleeps.clear()
         self.current_blink_start = None
