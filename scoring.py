@@ -82,6 +82,7 @@ def risk_level(score):
 
 # Reaction time (seconds): includes webcam + processing latency, so the
 # "healthy" anchor is higher than the ~0.2 s of a pure saccade.
+MIN_VALID_GAZE_TRIALS = 5  # Require at least half of the ten planned trials.
 GAZE_RT_HEALTHY_S = 0.5
 GAZE_RT_MAX_RISK_S = 1.5
 
@@ -105,14 +106,14 @@ def compute_gaze_score(gaze_results):
 
     Returns:
         dict with:
-            available     bool   False if no trials were completed
+            available     bool   False if too few tracked trials were completed
             score         float  0-100 risk score (0 if unavailable)
             level         str    risk band
             factors       list   human-readable abnormality strings
             breakdown     dict   points contributed by each factor
     """
     trials = int(gaze_results.get("trials", 0) or 0)
-    if trials <= 0:
+    if trials < MIN_VALID_GAZE_TRIALS:
         return {
             "available": False,
             "score": 0.0,

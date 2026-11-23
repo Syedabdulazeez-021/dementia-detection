@@ -28,7 +28,10 @@ shut.
 **Gaze, 10 trials.** A dot appears on the left or the right of the screen. The
 person looks at it. For each trial the app measures how quickly they reacted,
 whether they looked the correct way, and how fast the eye moved. If there is no
-response within 3 seconds, the trial ends and counts as incorrect.
+response within 3 seconds, the trial counts as incorrect if a face was seen.
+Trials with no face are excluded. After three such trials the app stops and
+asks the person to face the camera. At least five tracked trials are required
+for a gaze score.
 
 **Voice, 55 seconds.** The person describes a picture out loud. The app pulls 21
 measurements out of the recording. These cover tone, loudness across different

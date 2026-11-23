@@ -85,6 +85,7 @@ GAZE_FIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fig_ga
 # onset. A trial with no LEFT/RIGHT response within this window completes as
 # incorrect with no response, instead of blocking the loop indefinitely.
 GAZE_TRIAL_TIMEOUT_S = 3.0
+MAX_NO_FACE_TRIALS = 3
 
 # Physiological floor on gaze reaction time. A visually guided saccade cannot
 # start sooner than this after the stimulus, so a centre-to-lateral change
@@ -1416,6 +1417,7 @@ class DementiaDetectionGUI:
                             self.prev_eye_x = None
                             self.prev_time = None
                             # Response must be a fresh centre->lateral change.
+                            self._trial_face_seen = False
                             self._trial_seen_center = False
                             self.gaze_experiment_state = "STIMULUS"
                             
@@ -1432,6 +1434,7 @@ class DementiaDetectionGUI:
                         responded = False
 
                         if mesh_points is not None:
+                            self._trial_face_seen = True
                             ratio = self.get_ratio(mesh_points)
                             gaze_dir = self._classify_gaze(ratio)
 
@@ -1470,7 +1473,7 @@ class DementiaDetectionGUI:
                             # A timed-out trial contributes no reaction time: a
                             # non-response is not a latency measurement.
                             self._complete_gaze_trial(
-                                response, reaction if responded else None)
+                                response, reaction if responded else None, face_seen=self._trial_face_seen)
                     
                     self.current_gaze_frame = frame
 
@@ -1485,7 +1488,7 @@ class DementiaDetectionGUI:
         except Exception:
             pass
 
-    def _complete_gaze_trial(self, response, reaction):
+    def _complete_gaze_trial(self, response, reaction, *, face_seen=True):
         """Close out one gaze trial and advance the state machine.
 
         Called for EVERY completed trial — correct, incorrect, or timed out.
@@ -1498,6 +1501,17 @@ class DementiaDetectionGUI:
             reaction: seconds from stimulus onset, or None for a timeout
                       (a non-response must not enter the latency distribution)
         """
+        if response is None and not face_seen:
+            missed = self.gaze_results.get("no_face", 0) + 1
+            self.gaze_results["no_face"] = missed
+            if missed >= MAX_NO_FACE_TRIALS:
+                self.gaze_experiment_state = "TRACKING_LOST"
+                self.gaze_running = False
+            else:
+                self.gaze_experiment_state = "FIXATION"
+                self.fixation_time = time.time()
+            return
+
         if reaction is not None:
             self.gaze_results["reaction_times"].append(reaction)
             self.last_reaction_time = reaction
@@ -1577,13 +1591,16 @@ class DementiaDetectionGUI:
             except Exception:
                 pass
             
-        if not self.gaze_running and getattr(self, 'gaze_experiment_state', '') == "FINISHED":
+        state = getattr(self, 'gaze_experiment_state', '')
+        if not self.gaze_running and state in ("FINISHED", "TRACKING_LOST"):
             # All trials done — drop out of full screen back to the gaze page,
             # where the user can review the graphs and move on to voice analysis.
             self._close_gaze_fullscreen()
             self.start_gaze_btn.config(state=tk.NORMAL)
             self.finish_gaze_btn.config(state=tk.NORMAL)
             self.stop_gaze_btn.config(state=tk.DISABLED)
+            if state == "TRACKING_LOST":
+                messagebox.showwarning("Gaze tracking lost", "Please face the camera and restart the gaze test.")
             return  # stop the 33 ms refresh loop; nothing left to update
 
         if self.gaze_running:
@@ -1666,7 +1683,7 @@ class DementiaDetectionGUI:
         
         # Compute the gaze risk score (0-100) from the raw metrics
         self.gaze_score = compute_gaze_score(self.gaze_results)
-        self.gaze_results["score"] = self.gaze_score["score"]
+        self.gaze_results["score"] = self.gaze_score["score"] if self.gaze_score["available"] else None
         self.gaze_results["level"] = self.gaze_score["level"]
         
         # Get final metrics to save for displaying in Page 4
@@ -2321,6 +2338,8 @@ class DementiaDetectionGUI:
 
         fm = self.final_metrics
         gaze = getattr(self, 'gaze_results', {}) or {}
+        if not compute_gaze_score(gaze)['available']:
+            gaze = {}  # Omit unscored partial gaze measurements from the report.
         voice = getattr(self, 'voice_results', {}) or {}
         overall = getattr(self, 'overall_score', {}) or {}
         explanation = getattr(self, 'explanation', {}) or {}
