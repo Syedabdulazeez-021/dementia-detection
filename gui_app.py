@@ -437,7 +437,7 @@ class DementiaDetectionGUI:
         
         self.risk_label = tk.Label(
             self.risk_frame,
-            text="Risk Level: LOW",
+            text="Blink test not completed",
             font=("Segoe UI", 14, "bold"),
             bg='#11998e',
             fg='white'
@@ -446,7 +446,7 @@ class DementiaDetectionGUI:
         
         self.risk_score_label = tk.Label(
             self.risk_frame,
-            text="0%",
+            text="—",
             font=("Segoe UI", 26, "bold"),
             bg='#11998e',
             fg='white'
@@ -873,7 +873,7 @@ class DementiaDetectionGUI:
             risk_score = metrics['risk_score']
             
             self.risk_label.config(text=f"Risk Level: {risk_level}")
-            self.risk_score_label.config(text=f"{risk_score:.0f}%")
+            self.risk_score_label.config(text=f"{risk_score:.0f}%" if risk_score is not None else "—")
             
             # Update risk indicator color
             risk_colors = {
@@ -915,8 +915,9 @@ class DementiaDetectionGUI:
                     except Exception:
                         pass
                     messagebox.showinfo(
-                        "Blink Analysis Complete",
-                        "60-second blink analysis complete and saved.\n\n"
+                        "Blink Analysis",
+                        ("60-second blink analysis complete and saved." if metrics['risk_score'] is not None
+                         else "Blink test not completed.") + "\n\n"
                         "Click CONTINUE to run the Gaze test, use VOICE ANALYSIS,\n"
                         "or click FINISH & VIEW RESULTS to see the results now.")
             
@@ -1709,12 +1710,11 @@ class DementiaDetectionGUI:
         trials = gaze.get('trials', 0)
 
         # --- Per-test scores -------------------------------------------------
-        eye_score = self.final_metrics.get('risk_score', 0.0)
+        eye_score = self.final_metrics.get('risk_score')
         eye_level = self.final_metrics.get('risk_level', 'UNKNOWN')
 
         # Eye is only counted if the blink test actually produced data
-        eye_available = (self.final_metrics.get('total_blinks', 0) > 0
-                         or len(self.final_metrics.get('ear_history', []) or []) > 0)
+        eye_available = eye_score is not None
 
         gaze_score_info = compute_gaze_score(gaze) if gaze else {'available': False}
         gaze_available = gaze_score_info.get('available', False)
@@ -1780,7 +1780,7 @@ class DementiaDetectionGUI:
         used_str = " + ".join(used_names[u] for u in self.overall_score.get('used', [])) or "—"
 
         eye_score_str = (f"{eye_score:.0f}% ({eye_level}){' [ML]' if eye_is_ml else ''}"
-                         if eye_available else "N/A (not run)")
+                         if eye_available else "N/A (not completed)")
         gaze_score_str = (f"{gaze_score:.0f}% ({gaze_level}){' [ML]' if gaze_is_ml else ''}"
                           if gaze_available else "N/A (not completed)")
         voice_score_str = f"{voice_pct} ({voice_cat})" if voice_score_val is not None else "N/A (not run)"
@@ -2331,12 +2331,12 @@ class DementiaDetectionGUI:
         out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 f"report_{token}_{ts}.pdf")
 
-        eye_avail = (fm.get('total_blinks', 0) > 0 or len(fm.get('ear_history', []) or []) > 0)
+        eye_avail = fm.get('risk_score') is not None
         gaze_avail = gaze.get('trials', 0) > 0
         voice_avail = bool(voice) and isinstance(voice.get('risk_pct'), (int, float))
 
         def fmt_score(avail, score, level):
-            return f"{score:.0f}%  ({level})" if avail else "Not performed"
+            return f"{score:.0f}%  ({level})" if avail else "Not completed"
 
         try:
             fig = Figure(figsize=(8.27, 11.69), dpi=120)  # A4 portrait
@@ -2536,7 +2536,7 @@ class DementiaDetectionGUI:
         gaze_score_csv = round(gaze_info['score'], 1) if gaze_info.get('available') else ''
         overall = getattr(self, 'overall_score', None)
         if overall is None:
-            eye_s = self.final_metrics.get('risk_score', 0.0)
+            eye_s = self.final_metrics.get('risk_score')
             v_s = voice.get('risk_pct') if isinstance(voice, dict) else None
             overall = compute_overall_score(
                 eye_score=eye_s,
@@ -2565,8 +2565,8 @@ class DementiaDetectionGUI:
             self.final_metrics.get('total_blinks', 0),
             round(self.final_metrics.get('blink_rate', 0), 1),
             round(self.final_metrics.get('avg_ear', 0), 3),
-            self.final_metrics.get('risk_level', ''),
-            round(self.final_metrics.get('risk_score', 0), 0),
+            self.final_metrics.get('risk_level') if self.final_metrics.get('risk_score') is not None else 'Not completed',
+            round(self.final_metrics['risk_score'], 0) if self.final_metrics.get('risk_score') is not None else '',
             round(gaze.get('avg_reaction_time', 0), 2),
             round(gaze.get('avg_saccade_speed', 0), 2),
             round(gaze.get('accuracy', 0), 1),
@@ -2639,8 +2639,8 @@ class DementiaDetectionGUI:
         self.total_blinks_label.config(text="0")
         self.eye_openness_label.config(text="0.00")
         self.session_time_label.config(text="0")
-        self.risk_label.config(text="Risk Level: LOW", bg='#11998e')
-        self.risk_score_label.config(text="0%", bg='#11998e')
+        self.risk_label.config(text="Blink test not completed", bg='#11998e')
+        self.risk_score_label.config(text="—", bg='#11998e')
         self.risk_frame.config(bg='#11998e')
         self.risk_factors_text.config(state=tk.NORMAL)
         self.risk_factors_text.delete('1.0', tk.END)
@@ -2750,8 +2750,8 @@ class DementiaDetectionGUI:
         self.total_blinks_label.config(text="0")
         self.eye_openness_label.config(text="0.00")
         self.session_time_label.config(text="0")
-        self.risk_label.config(text="Risk Level: LOW", bg='#11998e')
-        self.risk_score_label.config(text="0%", bg='#11998e')
+        self.risk_label.config(text="Blink test not completed", bg='#11998e')
+        self.risk_score_label.config(text="—", bg='#11998e')
         self.risk_frame.config(bg='#11998e')
         self.risk_factors_text.config(state=tk.NORMAL)
         self.risk_factors_text.delete('1.0', tk.END)

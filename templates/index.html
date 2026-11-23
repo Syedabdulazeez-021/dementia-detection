@@ -270,7 +270,7 @@
 
                 <div class="risk-indicator" id="riskIndicator">
                     Risk Level: <span id="riskLevel">--</span><br>
-                    <span style="font-size: 2em;" id="riskScore">--</span>%
+                    <span style="font-size: 2em;" id="riskScore">--</span>
                 </div>
 
                 <div class="metrics-grid">
@@ -436,7 +436,7 @@
                     document.getElementById('sessionTime').textContent = Math.floor(data.session_duration);
 
                     // Update risk indicator
-                    document.getElementById('riskScore').textContent = data.risk_score.toFixed(0);
+                    document.getElementById('riskScore').textContent = data.risk_score == null ? '—' : data.risk_score.toFixed(0) + '%';
                     document.getElementById('riskLevel').textContent = data.risk_level;
 
                     const riskIndicator = document.getElementById('riskIndicator');

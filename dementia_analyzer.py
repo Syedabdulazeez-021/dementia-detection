@@ -17,6 +17,7 @@ NOMINAL_BLINK_WINDOW_S = 55.0
 # A recorded window further than this fraction from nominal is logged as a
 # warning, so a wrong duration cannot silently reach the score again.
 BLINK_WINDOW_TOLERANCE = 0.20
+MIN_BLINK_WINDOW_S = NOMINAL_BLINK_WINDOW_S * (1 - BLINK_WINDOW_TOLERANCE)
 
 class DementiaAnalyzer:
     """Analyzes eye patterns for dementia indicators."""
@@ -257,6 +258,10 @@ class DementiaAnalyzer:
             return None
         return self.window_end - self.window_start
 
+    def has_valid_blink_measurement(self):
+        window = self.measurement_window()
+        return self.is_calibrated and window is not None and window >= MIN_BLINK_WINDOW_S
+
     def calculate_blink_rate(self):
         """
         Calculate blinks per minute over the measurement window.
@@ -281,9 +286,8 @@ class DementiaAnalyzer:
         Called once when a recording stops.
         """
         dt = self.measurement_window()
-        if dt is None:
-            print("[BLINK][WARNING] measurement window never opened "
-                  "(EAR calibration did not complete); blink rate is 0.")
+        if not self.has_valid_blink_measurement():
+            print(f"[BLINK] Blink test not completed (requires {MIN_BLINK_WINDOW_S:g} s after calibration).")
             return
         print(f"[BLINK] window={dt:.2f} s, blinks={self.blink_count}, "
               f"rate={self.calculate_blink_rate():.2f} bpm")
@@ -390,6 +394,15 @@ class DementiaAnalyzer:
             dict with risk_score, risk_level, risk_factors and a
             score_breakdown of how each factor contributed.
         """
+        if not self.has_valid_blink_measurement():
+            stats = self.get_session_stats()
+            return {
+                'risk_score': None, 'risk_level': 'Not completed',
+                'risk_factors': ['Blink test not completed'], 'score_breakdown': {},
+                'blink_rate': stats['blink_rate'], 'blink_variance': stats['blink_variance'],
+                'avg_ear': stats['avg_ear'], 'total_blinks': self.blink_count,
+                'avg_predictions': self.get_avg_prediction(window_seconds=30),
+            }
         risk_factors = []
         breakdown = {}
 
@@ -592,7 +605,10 @@ if __name__ == "__main__":
     print("\n" + "="*70)
     print("DEMENTIA RISK ASSESSMENT")
     print("="*70)
-    print(f"Risk Score: {risk['risk_score']:.1f}%")
+    if risk['risk_score'] is None:
+        print("Blink test not completed")
+    else:
+        print(f"Risk Score: {risk['risk_score']:.1f}%")
     print(f"Risk Level: {risk['risk_level']}")
     print(f"Blink Rate: {risk['blink_rate']:.1f} blinks/minute")
     print(f"Total Blinks: {risk['total_blinks']}")

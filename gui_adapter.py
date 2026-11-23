@@ -149,7 +149,7 @@ class GUIDementiaAnalyzer:
             'measurement_window_s': stats['measurement_window_s'],
             'risk_score': risk_score,
             'risk_level': risk_level,
-            'risk_factors': risk_factors,
+            'risk_factors': risk_factors if risk_score is not None else risk_data['risk_factors'],
             'ear_history': list(self.analyzer.ear_history),
             'blink_times': [b['timestamp'] for b in self.analyzer.blink_history],
             'partial_blinks': self.analyzer.partial_blinks,
