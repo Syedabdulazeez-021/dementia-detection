@@ -3043,9 +3043,11 @@ class VoiceResultsWindow(tk.Toplevel):
 
     # Risk-level colour palette
     _RISK_COLORS = {
-        'Low':      ('#1a472a', '#2ecc71'),   # (bg, fg)
-        'Moderate': ('#7b4d00', '#f6ad55'),
-        'High':     ('#63171b', '#fc8181'),
+        'LOW':      ('#1a472a', '#2ecc71'),   # (bg, fg)
+        'MILD':     ('#594500', '#ffe082'),
+        'MODERATE': ('#7b4d00', '#f6ad55'),
+        'HIGH':     ('#63171b', '#fc8181'),
+        'VERY HIGH': ('#52101b', '#ff9caf'),
         'Unknown':  ('#2d3748', '#a0aec0'),
     }
 

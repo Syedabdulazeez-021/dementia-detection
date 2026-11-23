@@ -66,6 +66,7 @@ import matplotlib.gridspec as gridspec
 # BAND, BAD and BAND_ALPHA rather than from hard-coded hex values, so the voice
 # pages match the rest of the report instead of being a dark island in it.
 import crat_figures
+from scoring import risk_level
 from crat_figures import PAL, BAND, BAD, BAND_ALPHA, THRESH_LW
 
 V_DARK = PAL['voice']['dark']       # #6D28D9  primary voice series
@@ -662,8 +663,7 @@ class DementiaAnalyser:
         ORANGE = V_DARK
 
         fig = plt.figure(figsize=(18, 9), facecolor=BG)
-        risk_str = ('ELEVATED RISK INDICATORS' if prediction == 1.0
-                    else 'LOW RISK INDICATORS')
+        risk_str = risk_level(round(float(proba[1]) * 100, 1)) + ' RISK INDICATORS'
         risk_col  = BAD if prediction == 1.0 else V_DARK
         fig.suptitle(
             f'Voice Cognitive-Risk Dashboard  —  {risk_str}  '
@@ -1091,7 +1091,7 @@ class DementiaAnalyser:
             prediction      int    0 = no dementia, 1 = dementia detected
             proba           list   [P(normal), P(dementia)]  0–1 floats
             risk_pct        float  P(dementia) × 100
-            risk_category   str    'Low' | 'Moderate' | 'High'
+            risk_category   str    shared five-band risk level
             key_indicators  list   human-readable warning strings
             metrics         dict   jitter, shimmer, HNR, frac_silence,
                                    speech_rate, pitch_variability
@@ -1115,7 +1115,7 @@ class DementiaAnalyser:
 
         result = {
             'prediction': 0, 'proba': [1.0, 0.0], 'risk_pct': 0.0,
-            'risk_category': 'Low', 'key_indicators': [],
+            'risk_category': 'Unknown', 'key_indicators': [],
             'metrics': {}, 'plot_paths': {}, 'excel_path': None,
             'error': '', 'cancelled': False
         }
@@ -1210,13 +1210,8 @@ class DementiaAnalyser:
             if sil_pct_val > 40:
                 indicators.append(f"Excessive silence fraction ({sil_pct_val:.0f}% > 40%)")
 
-            risk_pct = proba[1] * 100
-            if risk_pct < 40:
-                risk_cat = 'Low'
-            elif risk_pct < 65:
-                risk_cat = 'Moderate'
-            else:
-                risk_cat = 'High'
+            risk_pct = round(float(proba[1]) * 100, 1)
+            risk_cat = risk_level(risk_pct)
 
             # Approximate per-feature attribution for explainability (guarded)
             feature_contributions = _compute_voice_attribution(self.model, cal)
@@ -1250,7 +1245,7 @@ class DementiaAnalyser:
             result.update({
                 'prediction':     int(prediction),
                 'proba':          [round(float(p), 4) for p in proba],
-                'risk_pct':       round(risk_pct, 1),
+                'risk_pct':       risk_pct,
                 'risk_category':  risk_cat,
                 'key_indicators': indicators,
                 'metrics':        metrics,
