@@ -27,6 +27,19 @@ import random
 # "major" on the report's top-drivers chart.
 MAJOR_DRIVER_PTS = 10.0
 
+def _empty_gaze_results():
+    return {
+        "avg_reaction_time": 0.0,
+        "avg_saccade_speed": 0.0,
+        "accuracy": 0,
+        "trials": 0,
+        "reaction_times": [],
+        "saccade_speeds": [],
+        # One peak speed per completed trial (presentational). The gaze
+        # score still uses the mean of saccade_speeds, unchanged.
+        "v_peaks": []
+    }
+
 def ear_to_percent(ear):
     """Convert Eye Aspect Ratio to an intuitive 0-100% scale."""
     return max(0.0, min(100.0, ((ear - 0.15) / (0.38 - 0.15)) * 100.0))
@@ -685,17 +698,7 @@ class DementiaDetectionGUI:
 
         self.gaze_cap = None
         self.gaze_running = False
-        self.gaze_results = {
-            "avg_reaction_time": 0.0,
-            "avg_saccade_speed": 0.0,
-            "accuracy": 0,
-            "trials": 0,
-            "reaction_times": [],
-            "saccade_speeds": [],
-            # One peak speed per completed trial (presentational). The gaze
-            # score still uses the mean of saccade_speeds, unchanged.
-            "v_peaks": []
-        }
+        self.gaze_results = _empty_gaze_results()
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = None
         self.gaze_fs_win = None
@@ -1227,17 +1230,7 @@ class DementiaDetectionGUI:
         self.gaze_running = True
         self.face_mesh = self.mp_face_mesh.FaceMesh(refine_landmarks=True)
         
-        self.gaze_results = {
-            "avg_reaction_time": 0.0,
-            "avg_saccade_speed": 0.0,
-            "accuracy": 0,
-            "trials": 0,
-            "reaction_times": [],
-            "saccade_speeds": [],
-            # One peak speed per completed trial (presentational). The gaze
-            # score still uses the mean of saccade_speeds, unchanged.
-            "v_peaks": []
-        }
+        self.gaze_results = _empty_gaze_results()
         self._last_gaze_plot_n = -1
         
         self.start_gaze_btn.config(state=tk.DISABLED)
@@ -1337,6 +1330,9 @@ class DementiaDetectionGUI:
     def stop_gaze_experiment(self):
         """Stop gaze experiment prematurely"""
         self.gaze_running = False
+        thread = getattr(self, 'gaze_thread', None)
+        if thread is not None:
+            thread.join()
         try:
             if self.gaze_cap:
                 self.gaze_cap.release()
@@ -1786,7 +1782,7 @@ class DementiaDetectionGUI:
         eye_score_str = (f"{eye_score:.0f}% ({eye_level}){' [ML]' if eye_is_ml else ''}"
                          if eye_available else "N/A (not run)")
         gaze_score_str = (f"{gaze_score:.0f}% ({gaze_level}){' [ML]' if gaze_is_ml else ''}"
-                          if gaze_available else "N/A (not run)")
+                          if gaze_available else "N/A (not completed)")
         voice_score_str = f"{voice_pct} ({voice_cat})" if voice_score_val is not None else "N/A (not run)"
 
         metrics_summary = (
@@ -2687,6 +2683,44 @@ class DementiaDetectionGUI:
             
     def reset_new_patient(self):
         """Reset forms and metrics for a new patient"""
+        if self.gaze_running:
+            self.stop_gaze_experiment()
+        thread = getattr(self, 'gaze_thread', None)
+        if thread is not None:
+            thread.join()
+        if self.face_mesh is not None:
+            self.face_mesh.close()
+            self.face_mesh = None
+        self.gaze_thread = None
+        self.gaze_results = _empty_gaze_results()
+        self.gaze_score = None
+        self.gaze_events.reset()
+        self.trial_count = self.correct_trials = self._trial_speed_start = 0
+        self.total_trials = 10
+        self.current_stimulus = self.prev_eye_x = self.prev_time = None
+        self.current_gaze_frame = None
+        self.stimulus_time = self.fixation_time = 0
+        self._trial_seen_center = False
+        self.gaze_experiment_state = "IDLE"
+        self.gaze_calibration_mode = False
+        self.gaze_calibration_stage = 0
+        self.gaze_calibration_data = {"LEFT": [], "CENTER": [], "RIGHT": []}
+        self.gaze_stage_time = self.gaze_calib_fail_time = 0
+        self.gaze_calib_fail_reason = None
+        self.gaze_axis_sign = 1.0
+        self.left_thresh = self.center_thresh = self.right_thresh = None
+        self.current_gaze_dir = "-"
+        self.last_reaction_time = self.last_saccade_speed = 0.0
+        self._last_gaze_plot_n = -1
+        self.gaze_video_label.configure(image='')
+        self.gaze_video_label.imgtk = None
+        self.gaze_dir_label.config(text="-")
+        self.reaction_time_label.config(text="0.00")
+        self.saccade_speed_label.config(text="0.00")
+        self.trial_num_label.config(text="0 / 10")
+        self.finish_gaze_btn.config(state=tk.DISABLED)
+        self.start_gaze_btn.config(state=tk.NORMAL)
+        self._init_gaze_graphs()
         self.patient_data = {}
         self.final_metrics = {}
         if hasattr(self, 'voice_results'):
